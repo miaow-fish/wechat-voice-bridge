@@ -6,6 +6,7 @@ __pycache__/
 venv/
 deps/
 *.key
+serein-link.json
 *.token
 *.sqlite*
 *.db*

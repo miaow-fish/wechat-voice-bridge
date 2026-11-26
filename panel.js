@@ -266,8 +266,10 @@ function renderAssets(){
     list.value=cfg[list.name]||"";
     const edit=btn("编辑",e=>withButton(e.currentTarget,()=>openAsset(kind,list.value)));edit.disabled=!list.value;list.onchange=()=>{edit.disabled=!list.value;};
     const head=node("div");head.className="section-head";head.append(node("h2",title));
-    if(kind==="worldbook")head.append(btn("导入世界书",()=>{el("worldbookFile").value="";el("worldbookFile").click();}));
+    const picker=el(kind+"File");
+    head.append(btn("导入"+title,()=>{picker.value="";picker.click();}));
     row.append(head);
+    if(kind==="persona")row.append(node("p","支持 TXT、Markdown、Word 和酒馆角色卡（JSON、PNG）。导入后可预览、编辑再选用。"));
     if(kind==="worldbook")row.append(node("p","支持 TXT、Markdown、Word（.docx）与酒馆世界书 JSON。文件可先预览，再选用。"));
     const controls=node("div");controls.className="asset-controls";
     controls.append(label("当前"+title,list),edit,btn(kind==="persona"?"新建人设":"手写世界书",()=>openAsset(kind)));row.append(controls);area.append(row);
@@ -304,7 +306,9 @@ function applyState(s,force=false,discard=[]){
   const l=s.login||{};const ended=["expired","failed","rejected","cancelled","needs_login"].includes(l.state);
   el("summary").textContent=(s.logged?"微信在线":"微信待登录")+" · "+(s.paired?"已绑定私聊":"私聊待绑定");
   el("summary").classList.toggle("online",s.logged);
-  el("memoryState").textContent=s.settings.memory_url?"已登记地址":"未配置";
+  el("memoryState").textContent=s.serein?.paired?"已配对私聊":s.settings.memory_url?"等待配对":"未启用";
+  el("checkMemory").disabled=!s.serein?.paired;
+  el("memoryCounts").textContent=s.serein?.paired?`已归档 ${s.serein.archived} 轮 · 待归档 ${s.serein.pending} 轮`:"";
   el("wxstate").textContent=s.logged?"已登录":ended?"上一次登录已结束，可以重新取码":l.state?"等待手机扫码或确认":"尚未登录";
   el("login").disabled=s.logged;el("pair").disabled=!s.logged||s.paired;
   el("pairstate").textContent=s.paired?"已绑定，助手可以在这段私聊中回复":s.logged?"请生成口令并私发给助手号":"等待助手号登录";
@@ -380,16 +384,17 @@ async function openAsset(kind,id,imported){
   el("importInfo").textContent=kind==="worldbook"?(json?(info?.count||0)+" 条，启用 "+(info?.enabled||0)+" 条。支持常驻与文字关键词匹配，单轮最多 16,000 字符。":"正文作为常驻背景。每轮最多使用 16,000 字符。"):"";
   el("assetResult").textContent="";el("assetDialog").showModal();
 }
-el("worldbookFile").onchange=async e=>{
+async function importAsset(kind,e){
   const file=e.target.files[0];if(!file)return;
   try{
     if(file.size>2*1024*1024)throw Error("请选择 2 MiB 以内的文件");
     const bytes=new Uint8Array(await file.arrayBuffer());let binary="";
     for(let i=0;i<bytes.length;i+=16384)binary+=String.fromCharCode(...bytes.subarray(i,i+16384));
-    const preview=await api("worldbooks/preview",{filename:file.name,file:btoa(binary)});
-    await openAsset("worldbook",null,preview);
+    const preview=await api(kind==="persona"?"personas/preview":"worldbooks/preview",{filename:file.name,file:btoa(binary)});
+    await openAsset(kind,null,preview);
   }catch(err){notice(err.message);}
-};
+}
+for(const kind of Object.keys(assetNames))el(kind+"File").onchange=e=>importAsset(kind,e);
 af.onsubmit=e=>{e.preventDefault();withButton(e.submitter||af.querySelector("button:not([type=button])"),async()=>{
   const kind=af.elements.kind.value;
   await api("library",{id:assetID,kind,name:af.elements.name.value,body:af.elements.body.value,format:af.elements.format.value,select:true});
@@ -414,6 +419,7 @@ for(const [id,mode] of [["dialCall","dial"],["answerCall","answer"],["stopCall",
 }
 for(const b of document.querySelectorAll("[data-close]"))b.onclick=()=>el(b.dataset.close).close();
 el("login").onclick=e=>withButton(e.currentTarget,async()=>{notice((await api("login",{})).message);await refresh();});
+el("checkMemory").onclick=e=>withButton(e.currentTarget,async()=>{await api("memory/check",{});notice("已连通本机 Serein");});
 el("pair").onclick=e=>withButton(e.currentTarget,async()=>{
   const p=await api("pair",{});el("paircode").textContent=p.code;el("pairbox").hidden=false;notice(p.message);
 });

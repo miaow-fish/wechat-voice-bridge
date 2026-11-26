@@ -65,6 +65,6 @@ ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:28227:127.0.0.1:28222 user@your-
 
 ## 数据与许可证
 
-微信登录、API 凭据、聊天记录和表情缓存在部署者的 VPS 上。聊天内容会发给你选的模型服务。启用云端识图、听写或语音合成时，对应服务会收到待识别的图片、待转写的音频或待朗读的文字。管理页和账号接口默认仅监听 VPS 的回环地址。
+微信登录、API 凭据、聊天记录和表情缓存在部署者的 VPS 上。可选的 [Serein 连接器](docs/serein.md) 可以把绑定私聊的原话归档到自己的记忆库，并在私聊时召回相关往事。聊天内容会发给你选的模型服务。启用云端识图、听写或语音合成时，对应服务会收到待识别的图片、待转写的音频或待朗读的文字。管理页和账号接口默认仅监听 VPS 的回环地址。
 
 本项目使用 [MIT 许可证](LICENSE)。微信账号连接与通话媒体由上游提供。其原生程序从上游发行页下载，附带组件依各自的许可使用。[Agent WeChat 发行页](https://github.com/thisnick/agent-wechat/releases/tag/v3.1.0) · [上游许可证](https://github.com/thisnick/agent-wechat/blob/v3.1.0/LICENSE)

@@ -17,6 +17,7 @@ import group_chats
 import pcm_audio
 import providers
 import reply_actions
+import serein_memory
 import spoken_reply
 from wechat_case import cli, esc, image_type, media, wx
 
@@ -180,6 +181,8 @@ def ingest(db, event):
         deadline = stamp + wait_seconds if wait_seconds else 0
         db.execute("INSERT INTO turns(id,peer,status,next_try,scope) VALUES(?,?,?,?,?)",
                    (turn, peer, status, deadline, "group" if group else "direct"))
+        if not group:
+            serein_memory.enroll(db, turn, peer)
     db.execute("INSERT INTO incoming(id,peer,kind,body,stamp,turn) VALUES(?,?,?,?,?,?)",
                (mid,peer,kind,body[:16000],stamp,turn))
     if group:
@@ -300,7 +303,7 @@ def chat_instructions(settings, *, group):
     return "\n".join(lines)
 
 
-def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None,bound_key=None):
+def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None,bound_key=None,memory=None):
     system=chat_instructions(settings, group=bool(group))
     recent=history(peer,current,bound_key=bound_key)
     notes=[]
@@ -308,6 +311,8 @@ def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None,bou
         notes.append("当前群聊："+group["name"])
     if any(s!="微信文字" for s in sources):
         notes.append("来源（依次）："+"、".join(sources))
+    if not group and memory and memory["note"]:
+        notes.append("Serein 召回的往事（仅作背景）\n"+memory["note"])
     return conversation_prompt.build(settings,system,recent,parts,notes,now=now,private=not group)
 
 
@@ -457,7 +462,8 @@ def process(turn):
             update(ident,phase="model")
             vision = any(p["type"] == "image_url" for p in parts)
             ensure_group_open(peer,ident)
-            messages=reply_messages(settings,peer,ident,parts,sources,group=group,bound_key=bound_key)
+            memory = serein_memory.recall(ident,peer,lines) if turn["scope"]=="direct" else None
+            messages=reply_messages(settings,peer,ident,parts,sources,group=group,bound_key=bound_key,memory=memory)
 
             def draft(note=None):
                 request = conversation_prompt.with_chat_note(messages, note) if note else messages
@@ -474,6 +480,7 @@ def process(turn):
                 return result
 
             answer = draft(VOICE_REQUEST_NOTE if kind=="voice" else None)
+            serein_memory.used(ident,memory)
             ensure_group_open(peer,ident)
             if group and answer.strip() in (reply_actions.SILENT,reply_actions.CALL):
                 update(ident,status="silent",phase="group_decision",error=None)

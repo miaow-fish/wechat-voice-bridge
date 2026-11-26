@@ -78,18 +78,63 @@ def parse(source, fmt):
     return entries
 
 
-def preview(filename, encoded):
-    if not isinstance(filename,str) or not isinstance(encoded,str): raise ValueError("请选择世界书文件")
+def read_upload(filename, encoded, *, character_card=False):
+    if not isinstance(filename,str) or not isinstance(encoded,str): raise ValueError("请选择要导入的文件")
     try: raw=base64.b64decode(encoded,validate=True)
     except ValueError as exc: raise ValueError("文件内容无效") from exc
     if not 0<len(raw)<=MAX_FILE: raise ValueError("请选择 2 MiB 以内的文件")
     suffix=Path(filename).suffix.lower()
     fmt="json" if suffix==".json" else "text"
     if suffix==".docx": source=read_docx(raw)
-    elif suffix in (".txt",".md",".json"):
+    elif suffix==".png" and character_card:
+        from PIL import Image
+        try:
+            with Image.open(BytesIO(raw), formats=("PNG",)) as pic:
+                encoded_card=pic.info.get("ccv3") or pic.info.get("chara")
+                if not isinstance(encoded_card,str): raise ValueError
+                source=base64.b64decode(encoded_card,validate=True).decode("utf-8-sig")
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise ValueError("PNG 内没有可读取的酒馆角色卡") from exc
+        fmt="json"
+    elif suffix in (".txt",".md",".markdown",".json"):
         try: source=raw.decode("utf-16" if raw.startswith((b"\xff\xfe",b"\xfe\xff")) else "utf-8-sig")
         except UnicodeError as exc: raise ValueError("请用 UTF-8 或 UTF-16 保存文本") from exc
     else: raise ValueError("请选择 JSON、TXT、MD 或 DOCX 文件")
+    return source,fmt
+
+
+def persona_preview(filename, encoded):
+    source,fmt=read_upload(filename,encoded,character_card=True)
+    name=Path(filename).stem[:80]
+    if fmt=="json":
+        try:
+            doc=json.loads(source)
+        except (ValueError,RecursionError) as exc:
+            raise ValueError("人设 JSON 格式无效") from exc
+        card=doc.get("data",doc) if isinstance(doc,dict) else None
+        if not isinstance(card,dict):
+            raise ValueError("请选择带有人设正文的角色卡")
+        card_name=card.get("name")
+        if isinstance(card_name,str) and card_name.strip():
+            name=card_name.strip()[:80]
+        sections=[]
+        for field,label in (("body",""),("persona",""),("description",""),("personality","性格"),
+                            ("scenario","背景"),("system_prompt","角色指令"),("mes_example","对话示例")):
+            value=card.get(field)
+            if isinstance(value,str) and value.strip():
+                sections.append((label+"\n" if label else "")+value.strip())
+        if not sections:
+            raise ValueError("角色卡中找不到人设、性格或背景正文")
+        if isinstance(card_name,str) and card_name.strip():
+            sections.insert(0,"角色名："+name)
+        source="\n\n".join(sections)
+    if not source.strip() or len(source.strip())>16000:
+        raise ValueError("人设正文须在 1 至 16,000 字符之间")
+    return {"name":name,"format":"text","body":source.strip()}
+
+
+def preview(filename, encoded):
+    source,fmt=read_upload(filename,encoded)
     entries=parse(source,fmt)
     return {"name":Path(filename).stem[:80],"format":fmt,"body":source,"count":len(entries),
             "enabled":sum(e["enabled"] for e in entries)}

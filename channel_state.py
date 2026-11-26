@@ -59,6 +59,18 @@ def init():
                 id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id), pos INTEGER NOT NULL,
                 kind TEXT NOT NULL, answer TEXT NOT NULL, requested TEXT, wire TEXT, send_id TEXT, receipt TEXT,
                 phase TEXT, status TEXT NOT NULL DEFAULT 'ready', error TEXT, UNIQUE(turn_id,pos));
+            CREATE TABLE IF NOT EXISTS serein_turns(
+                turn_id TEXT PRIMARY KEY REFERENCES turns(id), window_id TEXT NOT NULL,
+                delivered_ids TEXT, finished REAL, archived INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS serein_outbox ON serein_turns(window_id,archived);
+            CREATE TRIGGER IF NOT EXISTS serein_finished AFTER UPDATE OF status ON turns
+                WHEN NEW.status='accepted' OR (NEW.status='failed' AND EXISTS
+                    (SELECT 1 FROM turn_actions a WHERE a.turn_id=NEW.id AND a.status='accepted'))
+                BEGIN
+                    UPDATE serein_turns SET finished=COALESCE(finished, (julianday('now')-2440587.5)*86400.0)
+                    WHERE turn_id=NEW.id;
+                END;
             CREATE TABLE IF NOT EXISTS call_lines(
                 id INTEGER PRIMARY KEY, peer TEXT NOT NULL, stamp REAL NOT NULL, words TEXT NOT NULL, reply TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS call_lines_peer_stamp ON call_lines(peer,stamp);

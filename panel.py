@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import channel_state as st
 import channel_worker
+import serein_memory
 import deepseek_case as ds
 import providers
 import sensevoice_local
@@ -203,7 +204,7 @@ def state():
                 "group_account":sha256(own.encode()).hexdigest()[:16] if own and acct.get("authenticated") else None,
                 "paircode":pair.get("code") if acct.get("authenticated") and not st.get(db,"peer") and pair.get("expires",0)>time.time() else None,
                 "key": public_key(db), "models":st.get(db, "models", []), "settings":st.profile(db),
-                "group_routes":st.get(db,"group_routes",{}),
+                "group_routes":st.get(db,"group_routes",{}), "serein":serein_memory.status(db),
                 "providers":providers.all_public(db),"library":list(st.get(db,"library",{}).values()),
                 "stickers":st.get(db,"sticker_inventory",{}),"sticker_sync":st.get(db,"sticker_synced_at"),
                 "last_sticker":next((row[0] for row in db.execute("SELECT body FROM incoming WHERE kind=47 AND peer=? ORDER BY stamp DESC LIMIT 1",(st.get(db,"peer"),))),None),
@@ -267,7 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,data,"image/png")
         else:
             size = int(self.headers.get("Content-Length","0"))
-            limit=3*1024*1024 if path in ("/api/worldbooks/preview","/api/library") else 160000
+            limit=3*1024*1024 if path in ("/api/worldbooks/preview","/api/personas/preview","/api/library") else 160000
             if self.headers.get_content_type() != "application/json" or not 0 < size <= limit:
                 return self.reply(400,{"error":"请求格式无效"})
             data = json.loads(self.rfile.read(size))
@@ -275,6 +276,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("请求格式无效")
             if path == "/api/login":
                 return self.reply(200, begin_login())
+            if path == "/api/memory/check":
+                return self.reply(200, serein_memory.check())
             if path == "/api/pair":
                 return self.reply(200, pairing())
             if path == "/api/groups/refresh":
@@ -291,6 +294,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,providers.voices(data.get("id")))
             if path == "/api/library":
                 return self.reply(200,save_asset(data))
+            if path == "/api/personas/preview":
+                return self.reply(200,worldbooks.persona_preview(data.get("filename"),data.get("file")))
             if path == "/api/worldbooks/preview":
                 return self.reply(200,worldbooks.preview(data.get("filename"),data.get("file")))
             if path == "/api/worldbooks/open":
@@ -344,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     st.init()
     providers.initialize()
-    for run in (channel_worker.collect, channel_worker.deliver, channel_worker.restore_group_senders):
+    for run in (channel_worker.collect, channel_worker.deliver, channel_worker.restore_group_senders, serein_memory.worker):
         Thread(target=run,daemon=True).start()
     Thread(target=channel_worker.deliver,args=("group",),daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1",28222),Handler).serve_forever()

@@ -55,8 +55,8 @@
 </div>
 <div id="assets" class="assets"></div><div class="savebar"><button>保存人设、提示词与世界书</button></div></section>
 <section id="memory" class="view" hidden><div class="card"><div class="section-head"><h2>外部记忆服务</h2><span class="pill" id="memoryState"></span></div>
-<p>登记独立部署的记忆服务地址。当前微信通道尚未接入记忆读写接口。</p>
-<label class="space">服务地址<input type="url" name="memory_url" placeholder="https://memory.example.com" spellcheck="false"></label><div id="legacyMemory"></div></div><div class="savebar"><button>保存服务地址</button></div></section>
+<p>仅绑定好友的微信私聊可以召回记忆、保存原话。电脑休眠时私聊照常回复，归档等电脑上线后继续。</p>
+<label class="space">Serein 连接器地址<input type="url" name="memory_url" placeholder="http://127.0.0.1:28229" spellcheck="false"></label><button class="secondary" type="button" id="checkMemory">测试已保存的连接</button><p id="memoryCounts"></p><div id="legacyMemory"></div></div><div class="savebar"><button>保存服务地址</button></div></section>
 <section id="stickers" class="view" hidden><div class="card"><div class="section-head"><div><h2>助手账号的表情库</h2><p id="stickerSyncTime"></p></div><button type="button" class="secondary" id="syncStickers">同步微信表情库</button></div>
 <p>从当前登录的微信号读取已添加的整包和收藏。原图在发送时按需下载。</p><div id="stickerGroups" class="pack-grid"></div></div>
 <div class="card"><h2>收到别人的表情</h2><label class="space">没有微信名称时<select name="sticker_vision"><option value="off">仅对照助手表情库</option><option value="once">首次用已配置的识图服务，再次收到直接复用</option></select></label>
@@ -78,5 +78,6 @@
 <input type="hidden" name="kind"><input type="hidden" name="format"><label>名称<input name="name" required maxlength="80"></label><p id="importInfo"></p>
 <label><span id="assetBodyLabel">正文</span><textarea name="body" required rows="9"></textarea></label>
 <button>保存并选用</button><p class="result" id="assetResult" role="status"></p></form></dialog>
+<input id="personaFile" type="file" accept=".txt,.md,.markdown,.docx,.json,.png" hidden>
 <input id="worldbookFile" type="file" accept=".json,.txt,.md,.docx" hidden>
 <div id="notice" role="status" aria-live="polite" hidden></div></body></html>
