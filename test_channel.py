@@ -25,6 +25,31 @@ from concurrent.futures import Future
 
 
 class ChannelTest(unittest.TestCase):
+    def test_chat_uses_bound_call_receipts_and_keeps_them_out_of_groups(self):
+        cfg=st.DEFAULT
+        parts=[{"type":"text","text":"刚才那通电话接了吗"}]
+        def prompt(peer="friend",group=None):
+            return worker.reply_messages(cfg,peer,"turn",parts,["微信文字"],group=group)[-1]["content"]
+        self.assertIn("没有本次接听或接通的记录",prompt())
+        with st.database() as db:
+            st.put(db,"peer","friend")
+            st.put(db,"profile",{"call_auto_answer":True})
+        self.assertTrue(worker.call_channel.remember_offer("friend","test-call"))
+        self.assertIn("尚无接听回执",prompt())
+        with st.database() as db:
+            receipt=st.get(db,"bound_call_receipt")
+            receipt["actionAccepted"]=True
+            st.put(db,"bound_call_receipt",receipt)
+        self.assertIn("尚无接通回执",prompt())
+        with st.database() as db:
+            receipt.update(states=[{"state":"connected"}],mediaReady=True)
+            st.put(db,"bound_call_receipt",receipt)
+        self.assertTrue(worker.call_channel.remember_offer("friend","test-call"))
+        self.assertIn("微信已确认接通，本机语音通道已建立",prompt())
+        self.assertNotIn("微信已确认接通",prompt("different-friend"))
+        self.assertNotIn("通话回执",prompt("room@chatroom",{"name":"测试群","mode":"auto"}))
+        self.assertNotIn("微信已确认接通",prompt("room@chatroom",{"name":"测试群","mode":"auto"}))
+
     def test_builtin_preview_matches_model_messages_and_omits_personal_text(self):
         personal={"persona":"个人测试人设","worldbook":"个人测试背景","pinned_context":"个人测试指令","private_context":"私聊测试指令"}
         parts=[{"type":"text","text":"当前消息"}]

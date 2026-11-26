@@ -62,8 +62,9 @@
 <div class="card"><h2>收到别人的表情</h2><label class="space">没有微信名称时<select name="sticker_vision"><option value="off">仅对照助手表情库</option><option value="once">首次用已配置的识图服务，再次收到直接复用</option></select></label>
 <p id="lastSticker"></p></div><div class="savebar"><button>保存识别方式</button></div></section>
 </form>
-<section id="activity" class="view" hidden><div class="card"><h2>微信语音电话</h2><p id="callStatus"></p><p>点「等待来电」后，已绑定的联系人可在两分钟内打来。</p>
-<div class="controls space"><button type="button" id="dialCall">拨给已绑定的私聊</button><button type="button" class="secondary" id="answerCall">等待来电</button><button type="button" class="secondary" id="stopCall" disabled>结束通话</button></div></div>
+<section id="activity" class="view" hidden><div class="card"><h2>微信语音电话</h2>
+<label><input type="checkbox" id="autoAnswerCall">自动接听已绑定好友的语音电话</label><p id="callStandby"></p><p id="callStatus"></p>
+<div class="controls space"><button type="button" id="dialCall">拨给已绑定的私聊</button><button type="button" class="secondary" id="answerCall">等一次来电（2 分钟）</button><button type="button" class="secondary" id="stopCall" disabled>结束通话</button></div></div>
 <div class="card"><h2>投递记录</h2><p id="deliveries"></p><p id="last"></p><details id="speechBox" hidden><summary>最近一条语音的转写</summary><p id="speech"></p></details></div></section>
 </main></div>
 <dialog id="serviceDialog"><form id="serviceForm"><div class="section-head"><h2 id="serviceTitle">添加服务商</h2><button class="close" type="button" data-close="serviceDialog" aria-label="关闭">×</button></div>

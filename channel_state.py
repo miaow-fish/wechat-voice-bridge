@@ -16,7 +16,7 @@ DEFAULT = {
     "chat_model": "deepseek-flash", "vision_model": "deepseek-flash",
     "asr": "xfyun", "tts": "elevenlabs", "voice": "",
     "asr_model":"", "tts_model":"", "asr_language":"zh_cn", "asr_accent":"mandarin",
-    "note_rate":"16000", "call_cue":"off", "call_barge_in":True,
+    "note_rate":"16000", "call_cue":"off", "call_barge_in":True, "call_auto_answer":False,
     "sticker_vision":"off",
     "merge_messages": True, "merge_wait_seconds": 7,
     "split_bubbles": True, "history_turns": 30, "pinned_context": "", "private_context": "",

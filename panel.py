@@ -208,7 +208,7 @@ def state():
                 "providers":providers.all_public(db),"library":list(st.get(db,"library",{}).values()),
                 "stickers":st.get(db,"sticker_inventory",{}),"sticker_sync":st.get(db,"sticker_synced_at"),
                 "last_sticker":next((row[0] for row in db.execute("SELECT body FROM incoming WHERE kind=47 AND peer=? ORDER BY stamp DESC LIMIT 1",(st.get(db,"peer"),))),None),
-                "call":call,
+                "call":call, "call_listener":call_channel.standby_status(),
                 "local_tone_available":sensevoice_local.installed(),
                 "speech":dict(speech) if speech else None,
                 "login": {} if acct.get("authenticated") else login_status(db),
@@ -349,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     st.init()
     providers.initialize()
-    for run in (channel_worker.collect, channel_worker.deliver, channel_worker.restore_group_senders, serein_memory.worker):
+    for run in (channel_worker.collect, channel_worker.deliver, channel_worker.restore_group_senders, serein_memory.worker, call_channel.run_incoming):
         Thread(target=run,daemon=True).start()
     Thread(target=channel_worker.deliver,args=("group",),daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1",28222),Handler).serve_forever()

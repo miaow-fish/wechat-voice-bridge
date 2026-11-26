@@ -4,9 +4,11 @@ import base64
 from collections import deque
 from concurrent.futures import Future
 from contextlib import AsyncExitStack, aclosing
+from datetime import datetime
 import json
 from importlib.util import find_spec
 import math
+import sqlite3
 import struct
 from threading import Event, Lock, Thread
 import time
@@ -19,7 +21,7 @@ import providers
 import sensevoice_local
 import spoken_reply
 import voice_iat
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, WebSocketException
 from wechat_case import HOST, SCOPE, TOKEN, esc, wx
 
 FORMAT={"sampleRate":16000,"channels":1,"frameMs":20}
@@ -41,6 +43,8 @@ CALL_STAGES={"dialing":"正在拨号","ringing":"微信响铃中","connecting":"
 BASE=HOST.replace("http://","ws://",1)+SCOPE+"/calls"
 LOCK=Lock()
 stop_event=None
+active_peer=None
+standby={"ready":False,"message":"自动接听已关闭"}
 progress={"active":False,"stage":"尚未测试","received":0,"sent":0,"replies":0}
 
 
@@ -54,6 +58,110 @@ def snapshot():
         return dict(progress)
 
 
+def incoming_peer():
+    with st.database() as db:
+        if st.get(db,"profile",{}).get("call_auto_answer",False):
+            return st.get(db,"peer")
+    return None
+
+
+def is_bound_offer(offer,peer,offer_id=None):
+    return bool(offer and offer.get("callId") and offer.get("callerId")==peer
+                and offer.get("callType")=="voice" and offer.get("kind","direct")=="direct"
+                and (offer_id is None or offer["callId"]==offer_id))
+
+
+def set_standby(ready,message):
+    with LOCK:
+        standby.update(ready=ready,message=message)
+
+
+def standby_status():
+    with LOCK:
+        return dict(standby)
+
+
+def remember_offer(peer,offer_id):
+    with st.database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if st.get(db,"peer")!=peer or not st.get(db,"profile",{}).get("call_auto_answer"):
+            return False
+        last=st.get(db,"bound_call_receipt",{})
+        if last.get("peer")!=peer or last.get("offerId")!=offer_id:
+            st.put(db,"bound_call_receipt",{"peer":peer,"offerId":offer_id,"receiptAt":time.time(),"direction":"incoming"})
+        return True
+
+
+async def watch_incoming(sock,peer):
+    """Observe offers without reserving the account's outgoing-call slot."""
+    await send(sock,"call.hello",supportedProtocolVersions=[3,2])
+    hello=json.loads(await asyncio.wait_for(sock.recv(),5))
+    if (hello.get("type")!="hello" or hello.get("protocolVersion") not in (2,3)
+            or not hello.get("capabilities",{}).get("directAudio")):
+        raise ValueError("微信来电接口尚未就绪")
+    set_standby(True,"正在等已绑定好友来电")
+    offer=next((o for o in (hello.get("currentOffer"),hello.get("currentPendingOffer")) if is_bound_offer(o,peer)),None)
+    handled=None
+    while await asyncio.to_thread(incoming_peer)==peer:
+        if is_bound_offer(offer,peer) and offer["callId"]!=handled:
+            handled=offer["callId"]
+            if await asyncio.to_thread(remember_offer,peer,handled) and not snapshot()["active"]:
+                try:
+                    await asyncio.to_thread(start,"answer",expected_peer=peer,expected_offer=handled)
+                    set_standby(True,"正在等已绑定好友来电")
+                except (OSError,ValueError,TimeoutError):
+                    set_standby(False,"来电已到，暂时无法接听，请检查通话配置")
+        try:
+            event=json.loads(await asyncio.wait_for(sock.recv(),4))
+        except TimeoutError:
+            continue
+        if event.get("type")=="protocol.error":
+            raise ValueError("微信来电连接中断")
+        offer=event.get("offer") if event.get("type") in ("call.pending","call.offered") else None
+
+
+async def incoming_connections():
+    from websockets.asyncio.client import connect
+    while True:
+        try:
+            peer=await asyncio.to_thread(incoming_peer)
+            if peer:
+                set_standby(False,"正在连接微信来电")
+                headers={"Authorization":"Bearer "+TOKEN.read_text().strip()}
+                async with connect(BASE+"/socket",additional_headers=headers,proxy=None,open_timeout=5) as sock:
+                    await watch_incoming(sock,peer)
+            else:
+                set_standby(False,"自动接听未启用或尚未绑定好友")
+        except (OSError,ValueError,TimeoutError,WebSocketException,sqlite3.Error):
+            set_standby(False,"正在重新连接微信来电")
+        await asyncio.sleep(2)
+
+
+def run_incoming():
+    asyncio.run(incoming_connections())
+
+
+def private_call_note(peer):
+    with LOCK:
+        latest=dict(progress) if active_peer==peer and progress.get("active") and progress.get("receiptAt") else None
+    if latest is None:
+        with st.database() as db:
+            saved=st.get(db,"bound_call_receipt",{})
+        latest=saved if saved.get("peer")==peer else None
+    if not latest:
+        return "微信通话回执：没有本次接听或接通的记录，线路原因未知。"
+    stamp=datetime.fromtimestamp(latest["receiptAt"],conversation_prompt.BEIJING)
+    direction="来电" if latest["direction"]=="incoming" else "去电"
+    connected=any(e.get("state")=="connected" for e in latest.get("states",[]))
+    if connected:
+        result="微信已确认接通"+("，本机语音通道已建立" if latest.get("mediaReady") else "")
+    elif latest.get("actionAccepted"):
+        result=("微信已受理接听" if direction=="来电" else "微信已受理拨号")+"，尚无接通回执"
+    else:
+        result="已收到来电邀请，尚无接听回执" if direction=="来电" else "尚无拨号回执"
+    return f"微信最近一通有回执的{direction}是 {stamp:%m-%d %H:%M:%S}，{result}。只据对应时间的回执说明状态，手机听感和线路原因未知。"
+
+
 def stop():
     with LOCK:
         if stop_event:
@@ -61,8 +169,8 @@ def stop():
     return {"message":"正在结束本次通话测试"}
 
 
-def start(mode,*,expected_peer=None,turn_id=None):
-    global stop_event
+def start(mode,*,expected_peer=None,turn_id=None,expected_offer=None):
+    global stop_event,active_peer
     if mode not in ("answer","dial"):
         raise ValueError("通话方式无效")
     with st.database() as db:
@@ -70,6 +178,8 @@ def start(mode,*,expected_peer=None,turn_id=None):
         cfg=st.profile(db)
     if expected_peer is not None and peer!=expected_peer:
         raise ValueError("微信私聊绑定已改变")
+    if expected_offer and (mode!="answer" or not cfg.get("call_auto_answer")):
+        raise ValueError("自动接听已关闭")
     if not peer or not wx().get("authenticated"):
         raise ValueError("请先登录并绑定私聊")
     if not providers.public(providers.service(cfg["chat_service"]))["configured"]:
@@ -84,6 +194,8 @@ def start(mode,*,expected_peer=None,turn_id=None):
     if tts["kind"]=="elevenlabs" and find_spec("aiohttp"):
         cfg["_call_eleven"]=tts
     cfg["_peer"]=peer
+    if expected_offer:
+        cfg["_incoming_offer"]=expected_offer
     cfg["_call_history"]=st.recent_dialogue(peer,turn_id,for_call=True)
     if turn_id:
         with st.database() as db:
@@ -99,7 +211,10 @@ def start(mode,*,expected_peer=None,turn_id=None):
             raise ValueError("已有一项通话测试进行中")
         stop_event=Event()
         flag=stop_event
+        active_peer=peer
+        progress.clear()
         progress.update(active=True,stage="准备微信通话",received=0,sent=0,replies=0,states=[],
+                        direction="incoming" if mode=="answer" else "outgoing",receiptAt=None,actionAccepted=False,mediaReady=False,
                         endReason="",hangupSent=False,interruptions=0,sendGeneration=None,latencyMs={},maxFeedGapMs=0)
     def run():
         try:
@@ -116,6 +231,10 @@ def start(mode,*,expected_peer=None,turn_id=None):
                 saved=dict(progress)
                 with st.database() as db:
                     st.put(db,"last_call",saved)
+                    last=st.get(db,"bound_call_receipt",{})
+                    if saved.get("receiptAt") and saved["receiptAt"]>=last.get("receiptAt",0):
+                        receipt={k:saved[k] for k in ("receiptAt","direction","actionAccepted","mediaReady","states")}
+                        st.put(db,"bound_call_receipt",{**receipt,"peer":peer,"offerId":saved.get("receiptId")})
                     if turn_id:
                         connected=any(v["state"]=="connected" for v in saved["states"])
                         db.execute("UPDATE turns SET status=?,phase='call',answer=?,error=? WHERE id=?",
@@ -235,7 +354,7 @@ class Signal:
                     raise ValueError("微信通话请求未获接受（"+str(e.get("code") or "unknown")+"）")
                 return e
 
-    async def claim(self,mode,peer):
+    async def claim(self,mode,peer,*,expected_offer=None):
         await send(self.sock,"call.hello",supportedProtocolVersions=[3,2])
         until=time.monotonic()+5
         while not self.hello:
@@ -248,25 +367,36 @@ class Signal:
             await self.command("call.ready",ready=True,format=FORMAT,scope={"kind":"outgoing"})
             change(stage="等待对方接听")
             result=await self.command("call.dial",target={"kind":"direct","contactId":peer},callType="voice")
+            change(receiptAt=time.time(),receiptId=result.get("callId"))
         else:
             change(stage="等待已绑定联系人来电")
-            until=time.monotonic()+120
+            until=time.monotonic()+(12 if expected_offer else 120)
             prepared=None
-            def permitted(offer):
-                return bool(offer and offer.get("callerId")==peer and offer.get("callType")=="voice" and offer.get("kind","direct")=="direct")
-            while not permitted(self.offer):
-                if permitted(self.pending):
+            if expected_offer and not any(is_bound_offer(o,peer,expected_offer) for o in (self.pending,self.offer)):
+                raise ValueError("这通来电已撤回")
+            while not is_bound_offer(self.offer,peer,expected_offer):
+                if is_bound_offer(self.pending,peer,expected_offer):
                     current=(self.pending["callId"],self.pending["revision"])
                     if prepared!=current:
                         prepared=current
+                        change(receiptAt=time.time(),receiptId=current[0])
                         await self.command("call.ready",ready=True,format=FORMAT,
                                            scope={"kind":"offer","callId":current[0],"expectedRevision":current[1]})
                         continue
-                await self.next(until)
+                try:
+                    await self.next(until)
+                except TimeoutError:
+                    if expected_offer or prepared:
+                        raise ValueError("来电已到，等候接听的邀请已过期") from None
+                    raise ValueError("两分钟内没有收到已绑定好友的来电") from None
+            if expected_offer and await asyncio.to_thread(incoming_peer)!=peer:
+                raise ValueError("这通来电的自动接听已关闭")
+            change(receiptAt=time.time(),receiptId=self.offer["callId"])
             result=await self.command("call.answer",callId=self.offer["callId"],expectedRevision=self.offer["revision"])
         self.owned,self.token=result.get("callId"),result.get("ownerToken")
         if not self.owned or not self.token:
             raise ValueError("微信没有授予此通话的音频控制")
+        change(actionAccepted=True)
         until=float("inf")
         while True:
             state=self.call.get(self.owned,{}).get("state")
@@ -466,6 +596,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     epoch=0
     barge_in=cfg.get("call_barge_in",st.DEFAULT["call_barge_in"])
     advanced=asyncio.Event()
+    speech_began=asyncio.Event()
     playing=False
     live=None
     cue_input=cue_result=None
@@ -523,6 +654,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 was=audio.confirmed
                 raw=audio.feed(frame)
                 if audio.confirmed and not was:
+                    speech_began.set()
                     if barge_in:
                         advanced.set()
                         advanced=asyncio.Event()
@@ -631,8 +763,16 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
 
     async def reply():
         if greeting is not None:
-            try: hello=await greeting
+            welcome=asyncio.ensure_future(greeting)
+            heard=asyncio.create_task(speech_began.wait())
+            try:
+                done,_=await asyncio.wait((welcome,heard),return_when=asyncio.FIRST_COMPLETED)
+                hello=welcome.result() if welcome in done and not heard.done() else None
             except (OSError,ValueError,TimeoutError): hello=None
+            finally:
+                heard.cancel()
+                welcome.cancel()
+                await asyncio.gather(heard,welcome,return_exceptions=True)
             if hello and epoch==0:
                 await play(hello+(CHIME if cfg.get("call_cue")=="on" else b""),0)
         fragments=[]
@@ -716,7 +856,7 @@ async def connected_session(signal,cfg,flag,greeting,connect,headers):
                     if ready.get("type")!="media.ready" or ready.get("protocolVersion")!=version:
                         raise ValueError("通话音频未就绪")
                     delay=.5
-                    change(stage="已接通，等待讲话")
+                    change(stage="已接通，等待讲话",mediaReady=True)
                     first,greeting=greeting,None
                     await conversation(signal,media,ready,cfg,flag,first,own_control=False,history=history)
             except Exception as error:
@@ -762,7 +902,9 @@ async def session(mode,peer,cfg,flag):
         try:
             if mode=="dial":
                 greeting=asyncio.create_task(greeting_pcm(cfg))
-            await signal.claim(mode,peer)
+            await signal.claim(mode,peer,expected_offer=cfg.get("_incoming_offer"))
+            if mode=="answer":
+                greeting=asyncio.create_task(greeting_pcm(cfg))
             await connected_session(signal,cfg,flag,greeting,connect,headers)
             if not flag.is_set():
                 change(stage="微信通话已结束",endReason="微信已结束，未报告挂断方")

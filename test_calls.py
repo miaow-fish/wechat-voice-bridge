@@ -407,6 +407,64 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
     async def test_incoming_is_scoped_to_the_bound_peer(self):
         await self.check_claim("answer")
 
+    async def test_standby_accepts_only_distinct_voice_offers_from_the_bound_friend(self):
+        sock=Socket()
+        own={"callId":"one","kind":"direct","callerId":"friend","callType":"voice","revision":2}
+        sock.event({"type":"hello","protocolVersion":3,"capabilities":{"directAudio":True},
+                    "currentOffer":own|{"callerId":"stranger"},"currentPendingOffer":own})
+        for offer in (own,own|{"callerId":"stranger","callId":"foreign"},
+                      own|{"kind":"conference","callId":"group"},own|{"callType":"video","callId":"video"},
+                      None,own|{"callId":"two"},None):
+            sock.event({"type":"call.offered","offer":offer})
+        handled=[]
+        def start(mode,*,expected_peer,expected_offer):
+            handled.append((mode,expected_peer,expected_offer))
+        enabled=lambda: "friend" if len(handled)<2 else None
+        with patch.object(calls,"incoming_peer",side_effect=enabled),patch.object(calls,"start",side_effect=start), \
+             patch.object(calls,"remember_offer",return_value=True) as record, \
+             patch.object(calls,"snapshot",return_value={"active":False}):
+            await asyncio.wait_for(calls.watch_incoming(sock,"friend"),1)
+        self.assertEqual(handled,[("answer","friend","one"),("answer","friend","two")])
+        self.assertEqual([c.args for c in record.call_args_list],[("friend","one"),("friend","two")])
+        self.assertEqual([e["type"] for e in sock.sent],["call.hello"])
+
+    async def test_expired_automatic_offer_cannot_claim_a_different_call_from_the_same_friend(self):
+        sock=Socket()
+        sock.event({"type":"hello","capabilities":{"directAudio":True},"protocolVersion":3,
+                    "currentOffer":{"callId":"new","callerId":"friend","callType":"voice","revision":1}})
+        with self.assertRaisesRegex(ValueError,"撤回"):
+            await calls.Signal(sock,Event()).claim("answer","friend",expected_offer="old")
+        self.assertEqual([e["type"] for e in sock.sent],["call.hello"])
+
+    async def test_switching_off_before_pickup_leaves_the_ringing_offer_unanswered(self):
+        sock=Socket()
+        offer={"callId":"one","callerId":"friend","callType":"voice","revision":1}
+        sock.event({"type":"hello","capabilities":{"directAudio":True},"protocolVersion":3,"currentOffer":offer})
+        with patch.object(calls,"incoming_peer",return_value=None),self.assertRaisesRegex(ValueError,"关闭"):
+            await calls.Signal(sock,Event()).claim("answer","friend",expected_offer="one")
+        self.assertEqual([e["type"] for e in sock.sent],["call.hello"])
+
+    async def test_caller_can_speak_before_the_greeting_is_ready(self):
+        ctl,media=Socket(),Socket()
+        signal=calls.Signal(ctl,Event())
+        signal.owned="ours"
+        signal.call["ours"]={"state":"connected"}
+        ready={"protocolVersion":3,"sendTracks":[{"media":"audio","id":1,"generation":1,"format":calls.FORMAT}],
+               "receiveTracks":[{"media":"audio","id":2,"generation":1}]}
+        speech=struct.pack("<h",1600)*320*10 + bytes(640*45)
+        media.event(calls.pcm_frame(2,1,speech))
+        answer=b"\x07\x00"*320
+        def sent(frame):
+            if isinstance(frame,bytes):
+                self.assertEqual(calls.read_frame(frame)[2],answer)
+                ctl.event({"type":"call.state","call":{"callId":"ours","state":"ended"}})
+        media.on_send=sent
+        welcome=asyncio.create_task(asyncio.sleep(30,result=b"\x08\x00"*320))
+        with patch.object(providers,"recognize_pcm",return_value="喂"),patch.object(providers,"chat",return_value="我在"), \
+             patch.object(providers,"synthesize_pcm",return_value=answer),patch.object(calls,"TURN_PAUSE",0):
+            await asyncio.wait_for(calls.conversation(signal,media,ready,st.DEFAULT,signal.flag,welcome),2)
+        self.assertTrue(welcome.cancelled())
+
     async def test_outgoing_registers_audio_before_dial(self):
         await self.check_claim("dial")
         await self.check_claim("dial",3)

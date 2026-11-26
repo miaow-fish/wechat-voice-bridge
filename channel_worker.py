@@ -309,6 +309,10 @@ def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None,bou
     notes=[]
     if group:
         notes.append("当前群聊："+group["name"])
+    else:
+        words=parts if isinstance(parts,str) else "\n".join(p["text"] for p in parts if p["type"]=="text")
+        if re.search(r"电话|通话|来电|去电|回拨|接听|接通|没接|接了|挂断|线路",words):
+            notes.append(call_channel.private_call_note(peer))
     if any(s!="微信文字" for s in sources):
         notes.append("来源（依次）："+"、".join(sources))
     if not group and memory and memory["note"]:
