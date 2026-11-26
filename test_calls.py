@@ -31,6 +31,20 @@ class Socket:
 
 
 class DirectCallTests(unittest.IsolatedAsyncioTestCase):
+    def test_history_counts_user_turns_when_a_spoken_reply_is_interrupted(self):
+        history = [
+            {"role":"user","content":"第一轮"},
+            {"role":"assistant","content":"第一轮的回答"},
+            {"role":"user","content":"第二轮，回答被打断"},
+            {"role":"user","content":"第三轮"},
+            {"role":"assistant","content":"第三轮的回答"},
+        ]
+        for limit, expected in ((0, []), (1, history[3:]), (2, history[2:]), (3, history)):
+            with self.subTest(limit=limit):
+                messages=calls.call_messages({"history_turns":limit},history,"当前这轮")
+                self.assertEqual(messages[1:-1],expected)
+                self.assertIn("当前这轮",messages[-1]["content"])
+
     def test_hangup_is_an_explicit_action(self):
         self.assertEqual(calls.end_decision("明天听你说下半段。晚安\n[[END_CALL]]"),
                          ("明天听你说下半段。晚安","助手已道别"))

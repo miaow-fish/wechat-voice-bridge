@@ -321,13 +321,25 @@ def end_decision(answer):
     return words, "助手已道别" if marked and words else ""
 
 
+def recent_call_turns(history, limit):
+    """An interrupted reply can leave a user turn with no assistant message."""
+    start = len(history)
+    for index in range(len(history) - 1, -1, -1):
+        if limit <= 0:
+            break
+        if history[index]["role"] == "user":
+            start = index
+            limit -= 1
+    return history[start:]
+
+
 def call_messages(cfg, history, current, *, now=None):
     prompt = ("这是一通已接通的微信语音电话。你收到的文字是对方刚才讲话的转写，语气标签供你参考。"
               "你的回答会从对方的听筒播出。用一两句自然的口语回应。"
               "你可以自己挂断这通电话。想继续聊就正常说话。想结束就自然地道别，"
               "最后单独写一行 "+END_MARK+"，后台会在你说完后挂断。")
-    limit=2*cfg.get("history_turns",st.DEFAULT["history_turns"])
-    return conversation_prompt.build(cfg,prompt,history[-limit:] if limit else [],current,now=now,private=True)
+    limit=cfg.get("history_turns",st.DEFAULT["history_turns"])
+    return conversation_prompt.build(cfg,prompt,recent_call_turns(history,limit),current,now=now,private=True)
 
 
 async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=True,history=None):
@@ -529,14 +541,11 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             if totals["sent"]>sent_before:
                 fragments.clear()
                 history.append(msg)
+                if complete:
+                    history.append({"role":"assistant","content":answer})
+                history[:]=recent_call_turns(history,cfg.get("history_turns",st.DEFAULT["history_turns"]))
             if not complete: continue
             totals["replies"]+=1
-            history.append({"role":"assistant","content":answer})
-            limit=2*cfg.get("history_turns",st.DEFAULT["history_turns"])
-            if limit:
-                del history[:-limit]
-            else:
-                history.clear()
             if cfg.get("_peer"):
                 await asyncio.to_thread(st.remember_call_line,cfg["_peer"],msg["content"],answer)
             if finish:

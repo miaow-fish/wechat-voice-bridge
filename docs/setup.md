@@ -25,7 +25,9 @@
 
 ## 人设、世界书和上下文
 
-在「人设与世界书」里填人设，或导入 TXT、Markdown、DOCX、酒馆世界书 JSON，再预览并选用。关键词条目由当轮文字激活，常驻条目随每轮使用。同页的「注入模型的上下文」提供共同固定内容、仅好友私聊和电话使用的补充，以及近期对话轮数。默认 30 轮。固定内容先进入系统消息，然后是本会话的历史，再是当前发言和北京时间。群里的旁听轮可以接到后续群聊中。
+在「对话上下文」里填写每次带入的历史轮数，点「保存轮数」。例如设为 2 时，每次取本会话最近两轮历史，再加当前发言。合并处理的几条微信算一轮。历史不足时带入已有轮数，0 表示跳过历史。默认 30 轮，上限 100 轮。群聊中的旁听轮也计入本群历史。
+
+「人设与世界书」管理人设、提示词和背景资料。「提示词（Prompt）」里可以填写通用指令和私聊与电话专用指令。世界书可导入 TXT、Markdown、DOCX 或酒馆世界书 JSON，关键词条目由当轮文字激活，常驻条目随每轮使用。
 
 「外接记忆」只登记地址，本版尚未执行外部记忆读写。陌生表情首次识图可以单独开启，已认出的同一张图会使用缓存。表情素材来自各自微信号已添加的表情包与收藏。
 
@@ -69,13 +71,13 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:28222/api/state
 
 **安装提示已有目录或端口被占用。** 首次安装脚本用于新实例，遇到原有目录会退出。已有部署可用 `systemctl status` 查看服务。启动报错时可在本机查日志。
 
-### 从 v0.1.0 更新工作台
+### 从 v0.1.0 或 v0.2.0 更新工作台
 
 在之前克隆的仓库里运行以下命令。选一个没有通话和待发回复的时段。这个版本沿用已有的微信登录、绑定和服务商设置，工作台首次启动时自动升级聊天数据库。
 
 ~~~sh
 git fetch origin --tags
-git switch --detach v0.2.0
+git switch --detach v0.2.1
 panel=/opt/wechat-vps-case/panel
 sudo tar -C "$panel" --exclude=deps --exclude=__pycache__ -czf "/root/wechat-panel-code-$(date +%Y%m%d-%H%M%S).tar.gz" .
 sudo systemctl stop wechat-vps-panel
@@ -95,5 +97,5 @@ Python 3.11 及以上，系统中需有 FFmpeg 和 ffprobe。以下测试使用�
 ~~~sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -B -m unittest -v test_channel test_calls
+.venv/bin/python -B -m unittest discover -v
 ~~~

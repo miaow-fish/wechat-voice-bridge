@@ -8,9 +8,10 @@ let selectedRole=sessionStorage.getItem("wx-role")||"asr";
 if(!Object.hasOwn(fields,selectedRole))selectedRole="asr";
 const pages={
   connect:["微信连接","登录助手微信，选择好友和群聊。"],
+  context:["对话上下文","每次回复前，从当前会话带上最近几轮聊天。合并处理的几条微信算一轮。"],
   routes:["模型与声音","为每种用途选择实际处理它的服务。"],
   providers:["服务商","管理接口地址、凭据和可用模型。"],
-  profiles:["人设与世界书","设置人设、世界书和每次发给模型的上下文。"],
+  profiles:["人设与世界书","设置助手的人设、提示词和背景资料。"],
   memory:["外接记忆","管理微信通道与独立记忆系统的连接配置。"],
   stickers:["微信表情","管理助手能发出的表情，以及收到表情时的识别方式。"],
   activity:["通话与记录","发起微信电话，查看语音和消息的投递情况。"]

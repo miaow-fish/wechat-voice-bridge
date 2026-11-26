@@ -124,7 +124,7 @@ def save_profile(data):
         if not 0 <= cfg["history_turns"] <= st.MAX_HISTORY_TURNS:
             raise ValueError("最近对话轮数须在 0 到 %d 之间"%st.MAX_HISTORY_TURNS)
         if max(len(cfg["pinned_context"]),len(cfg["private_context"]))>16000:
-            raise ValueError("每段固定上下文最多 16,000 字符")
+            raise ValueError("每段提示词最多 16,000 字符")
         if not 0 < cfg["merge_wait_seconds"] < 2**53:
             raise ValueError("等待时长须为有效的正整数秒")
         library=st.get(db,"library",{})
