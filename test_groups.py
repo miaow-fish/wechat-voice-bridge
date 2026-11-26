@@ -174,6 +174,7 @@ class GroupTest(unittest.TestCase):
         with self.assertRaises(ValueError): group_chats.configure("left@chatroom","auto")
 
     def test_refresh_checks_current_membership_and_uses_the_latest_group_name(self):
+        rejoined=False
         def native(path="",data=None):
             if not path: return {"ownUsername":"assistant"}
             if path=="/group-sync": return {"id":"operation","state":"queued"}
@@ -182,13 +183,17 @@ class GroupTest(unittest.TestCase):
                 {"id":ROOM,"displayName":"新群名"},{"id":OTHER,"displayName":"旧群名"}]}
             if "/lookup?" in path:
                 room=ROOM if "other" not in path else OTHER
-                return {"id":room,"items":[{"id":"assistant"}] if room==ROOM else []}
+                present=room==ROOM or rejoined
+                return {"id":room,"version":12 if present else 0,"items":[{"id":"assistant"}] if present else []}
             self.fail(path)
         with patch.object(group_chats,"wx",side_effect=native), patch.object(group_chats.time,"sleep"):
             page=group_chats.refresh_page()
+            rejoined=True
+            after_rejoin=group_chats.list_page()
         self.assertTrue(page["catalogComplete"])
         self.assertEqual(page["items"],[{"id":ROOM,"name":"新群名"}])
-        self.assertEqual(page["unverified"],[{"id":OTHER,"name":"旧群名"}])
+        self.assertEqual(page["unverified"],[])
+        self.assertEqual([room["id"] for room in after_rejoin["items"]],[ROOM,OTHER])
 
     def test_lookup_timeout_preserves_unverified_route_and_pagination(self):
         original=self.wx

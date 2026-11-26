@@ -17,17 +17,23 @@ def list_page(cursor=""):
     items, unverified = [], []
     for item in page.get("items", []):
         room = item.get("id")
-        if not room or item.get("deleted") or item.get("isInGroup") is False:
+        if not room or item.get("deleted"):
             continue
         entry = {"id": room, "name": item.get("displayName") or room}
         try:
             roster = wx("/groups/" + esc(room) + "/lookup?version=0")
-            confirmed = roster.get("id") == room and any(
-                member.get("id") == own for member in roster.get("items", [])
-            )
+            members = roster.get("items")
+            if roster.get("id") == room and isinstance(members,list):
+                if not members and roster.get("version") == 0:
+                    # A successful empty zero-version roster has no room to display.
+                    # Re-check on the next refresh in case the account rejoins.
+                    continue
+                if any(member.get("id") == own for member in members):
+                    items.append(entry)
+                    continue
         except (URLError, TimeoutError, ValueError):
-            confirmed = False
-        (items if confirmed else unverified).append(entry)
+            pass
+        unverified.append(entry)
     return {"items": items, "unverified": unverified, "nextCursor": page.get("nextCursor")}
 
 

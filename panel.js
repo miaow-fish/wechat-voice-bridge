@@ -74,16 +74,10 @@ function renderGroupRows(list, groups, routes, verified) {
   }
 }
 function showGroups(routes) {
-  const unverified=new Map(unverifiedGroups);
-  if(groupChecked && !groupCursor){
-    for(const [id,route] of Object.entries(routes)){
-      if(!availableGroups.has(id) && !unverified.has(id))unverified.set(id,route.name);
-    }
-  }
   renderGroupRows(el("groupList"),availableGroups,routes,true);
-  renderGroupRows(el("unverifiedList"),unverified,routes,false);
-  el("unverifiedGroups").hidden=!unverified.size;
-  el("unverifiedTitle").textContent="暂未确认的群（"+unverified.size+"）";
+  renderGroupRows(el("unverifiedList"),unverifiedGroups,routes,false);
+  el("unverifiedGroups").hidden=!unverifiedGroups.size;
+  el("unverifiedTitle").textContent="暂未确认的群（"+unverifiedGroups.size+"）";
   el("readGroups").disabled=!live?.group_account || groupBusy;
   el("moreGroups").hidden=!groupCursor;el("moreGroups").disabled=groupBusy;
   let status="登录后可查看群聊";
