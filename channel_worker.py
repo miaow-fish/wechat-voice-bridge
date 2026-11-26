@@ -235,34 +235,36 @@ def history(peer,current):
     return st.recent_dialogue(peer,current)
 
 
-VOICE_REQUEST_NOTE = "对方这轮想听语音，按语音代号回复。"
-VOICE_DENIAL_NOTE = "语音条已准备好发送。请直接和对方聊一句，自选内容，无需解释功能。"
-CALL_RETRY_NOTE = "本轮对方没有邀请回拨。直接回答这轮的话。"
-MISSING_VOICE_NOTE = "你已选择用语音回复。根据同一段对话写下想说的话。这次只输出台词。"
+VOICE_REQUEST_NOTE = "这轮请用语音回复。"
+VOICE_DENIAL_NOTE = "语音已就绪，用语音回刚才那句话。"
+CALL_RETRY_NOTE = "这轮没有回拨邀请，直接回消息。"
+MISSING_VOICE_NOTE = "这段会直接念给对方，只输出台词。"
+
+
+def voice_note(settings, note):
+    if providers.has_audio_tags(settings):
+        return note + "\n" + spoken_reply.VOICE_INSTRUCTION
+    return note
 
 
 def chat_instructions(settings, *, group):
-    system=("你正在参加微信群聊。结合发言者和群内上下文，决定此刻是否接话。" if group else
-            "你在微信私聊中直接回复对方。可以简短，按当前消息的语境回答。")
-    voice_on=bool(settings["tts"]!="off" and settings.get("voice"))
-    call_on=voice_on and settings["asr"]!="off"
-    system+="\n当前微信功能：表情包由通道从这个微信号的已下载表情中选择并发送。"
-    system+=("语音条可用，助手自己决定说什么，系统用已配置的音色发送。" if voice_on else "语音条暂未启用。")
-    if not group:
-        system+=("一对一微信电话可用，收到当前联系人的明确回拨请求会实际拨号。" if call_on else "一对一微信电话暂未配置完整。")
-    system+="有关功能以当前状态为准。历史回答只是当时说过的话。"
-    system+="\n"+(reply_actions.GROUP_RULES if group else reply_actions.RULES)
-    if settings.get("split_bubbles",True):
-        system+="\n日常微信可以只回一个短句。想另发一条时换行。"
-    if settings["asr"]!="off":
-        system+="\n收到微信语音时，按转写内容回应，语气标注只供理解本句。"
-    if voice_on:
-        system+="\n"+(spoken_reply.VOICE_INSTRUCTION if providers.has_audio_tags(settings)
-                     else "用语音条时，台词写成可以直接朗读的话。")
-    return system
+    scene = "微信群聊，留意谁在跟谁说话。" if group else "微信私聊。"
+    style = "多用日常口语和短句，句末标点可省，也可以只回标点或表情包。"
+    if settings.get("split_bubbles", True):
+        style += "想分气泡就换行。"
+    lines = [scene + style]
+    voice = providers.audio_route_ready(settings, "tts")
+    if voice:
+        lines.append(f"发语音按下面的行序写，混发时把两部分分开\n{reply_actions.VOICE}\n要念的台词\n另发的文字（可省）")
+    lines.append(f"发表情包时单独写一行 {reply_actions.STICKER}。")
+    if group:
+        lines.append(f"想旁听时，只回 {reply_actions.SILENT}。")
+    elif voice and providers.audio_route_ready(settings, "asr"):
+        lines.append(f"对方请你打电话时，只回 {reply_actions.CALL}。")
+    return "\n".join(lines)
 
 
-def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=None):
+def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None):
     system=chat_instructions(settings, group=bool(group))
     recent=history(peer,current)
     notes=[]
@@ -270,8 +272,6 @@ def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=Non
         notes.append("当前群聊："+group["name"])
     if any(s!="微信文字" for s in sources):
         notes.append("来源（依次）："+"、".join(sources))
-    if kind=="voice":
-        notes.append(VOICE_REQUEST_NOTE)
     return conversation_prompt.build(settings,system,recent,parts,notes,now=now,private=not group)
 
 
@@ -298,8 +298,12 @@ def allows_model_call(lines):
 
 
 def sticker_context(peer,ident,lines,assistant_text=""):
-    recent=history(peer,ident)[-4:]
-    return "\n".join([m["content"][-140:] for m in recent]+lines[-3:]+[assistant_text[:160]]).strip()[-640:]
+    recent = history(peer,ident)[-4:]
+    context = [("助手" if m["role"]=="assistant" else "对方")+"："+m["content"][-75:] for m in recent]
+    context.append("对方这轮："+"\n".join(lines[-3:])[-140:])
+    if assistant_text:
+        context.append("助手这轮的回复："+assistant_text[:140])
+    return "\n".join(context)
 
 
 def save_plan(ident,lines,parts,hint):
@@ -394,15 +398,19 @@ def process(turn):
             update(ident,phase="model")
             vision = any(p["type"] == "image_url" for p in parts)
             ensure_group_open(peer,ident)
-            messages=reply_messages(settings,peer,ident,kind,parts,sources,group=group)
-            answer = providers.chat(settings,messages,vision=vision)
+            messages=reply_messages(settings,peer,ident,parts,sources,group=group)
+
+            def draft(note=None):
+                request = conversation_prompt.with_chat_note(messages, note) if note else messages
+                return providers.chat(settings, request, vision=vision)
+
+            answer = draft(voice_note(settings,VOICE_REQUEST_NOTE) if kind=="voice" else None)
             ensure_group_open(peer,ident)
-            if group and (reply_actions.SILENT in answer or reply_actions.CALL in answer):
+            if group and answer.strip() in (reply_actions.SILENT,reply_actions.CALL):
                 update(ident,status="silent",phase="group_decision",error=None)
                 return
             if kind=="voice" and VOICE_DENIAL.search(answer):
-                messages=conversation_prompt.with_chat_note(messages,VOICE_DENIAL_NOTE)
-                answer=providers.chat(settings,messages,vision=vision)
+                answer=draft(voice_note(settings,VOICE_DENIAL_NOTE))
                 if VOICE_DENIAL.search(answer):
                     raise ValueError("回复与当前可用的微信语音功能矛盾，正在重新生成")
             plan=reply_actions.parse(answer)
@@ -410,8 +418,7 @@ def process(turn):
                 if allows_model_call(lines):
                     dispatch_call(ident,peer,lines)
                     return
-                messages=conversation_prompt.with_chat_note(messages,CALL_RETRY_NOTE)
-                answer=providers.chat(settings,messages,vision=vision)
+                answer=draft(CALL_RETRY_NOTE)
                 plan=reply_actions.parse(answer)
                 if plan and plan[0][0]=="call":
                     raise ValueError("这轮没有明确的回拨请求")
@@ -434,9 +441,8 @@ def process(turn):
                     if action=="voice" and settings["tts"]=="off":
                         raise ValueError("私聊配置已关闭语音合成")
                     if action=="voice" and not value:
-                        writing=conversation_prompt.with_chat_note(messages,MISSING_VOICE_NOTE)
-                        value=providers.chat(settings,writing,vision=vision)
-                        if reply_actions.SILENT in value or reply_actions.parse(value) or VOICE_DENIAL.search(value):
+                        value=draft(voice_note(settings,MISSING_VOICE_NOTE))
+                        if value.strip()==reply_actions.SILENT or reply_actions.parse(value) or VOICE_DENIAL.search(value):
                             raise ValueError("语音台词仍未生成")
                     resolved.append((action,value))
                 if kind=="voice" and not any(a=="voice" for a,_ in resolved):

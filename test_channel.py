@@ -28,6 +28,8 @@ class ChannelTest(unittest.TestCase):
     def test_builtin_preview_matches_model_messages_and_omits_personal_text(self):
         personal={"persona":"个人测试人设","worldbook":"个人测试背景","pinned_context":"个人测试指令","private_context":"私聊测试指令"}
         parts=[{"type":"text","text":"当前消息"}]
+        providers.save({"id":"elevenlabs","kind":"elevenlabs","name":"测试合成","key":"fixture"})
+        providers.save({"id":"xfyun","kind":"xfyun","name":"测试听写","key":"fixture","app_id":"fixture","secret":"fixture"})
         for enabled in (True,False):
             cfg={**st.DEFAULT,"tts":"elevenlabs" if enabled else "off","voice":"fixture",
                  "tts_model":"eleven_v4","asr":"xfyun" if enabled else "off","split_bubbles":enabled}
@@ -39,10 +41,34 @@ class ChannelTest(unittest.TestCase):
             for value in personal.values(): self.assertNotIn(value,str(entries))
             with patch.object(worker,"history",return_value=[]):
                 for title,group in (("微信私聊",None),("微信群聊",{"name":"群"})):
-                    actual=worker.reply_messages(cfg,"peer",None,"text",parts,["微信文字"],group=group)
+                    actual=worker.reply_messages(cfg,"peer",None,parts,["微信文字"],group=group)
                     self.assertEqual(texts[title],actual[0]["content"])
+                    self.assertIn("只回标点或表情包",texts[title])
+                    self.assertEqual(texts[title].count(reply_actions.STICKER),1)
+                    self.assertEqual(texts[title].count(reply_actions.VOICE),int(enabled))
+                    self.assertNotIn("[laughs]",texts[title])
             self.assertEqual(texts["实时语音电话"],worker.call_channel.call_messages(cfg,[],"喂")[0]["content"])
-            self.assertEqual("想另发一条时换行" in texts["微信私聊"],enabled)
+            self.assertEqual("想分气泡就换行" in texts["微信私聊"],enabled)
+            self.assertEqual(reply_actions.CALL in texts["微信私聊"],enabled)
+            self.assertNotIn(reply_actions.CALL,texts["微信群聊"])
+            self.assertIn(reply_actions.SILENT,texts["微信群聊"])
+            self.assertNotIn(reply_actions.SILENT,texts["微信私聊"])
+            self.assertEqual("[laughs]" in texts["私聊请求语音"],enabled)
+            self.assertEqual([e["title"] for e in entries if e["kind"]=="scene"],["微信私聊","微信群聊","实时语音电话"])
+
+    def test_chat_only_explains_audio_actions_with_ready_routes(self):
+        cfg=st.DEFAULT|{"voice":"sample","tts_model":"eleven_v4"}
+        def instructions(**changes):
+            return worker.chat_instructions(cfg|changes, group=False)
+        self.assertNotIn(reply_actions.VOICE,instructions())
+        providers.save({"id":"elevenlabs","kind":"elevenlabs","name":"测试合成","key":"fixture"})
+        self.assertIn(reply_actions.VOICE,instructions())
+        self.assertNotIn(reply_actions.VOICE,instructions(voice=""))
+        self.assertNotIn(reply_actions.VOICE,instructions(tts_model=""))
+        self.assertNotIn(reply_actions.CALL,instructions())
+        custom=providers.save({"kind":"compatible","name":"听写","base":"http://localhost:9000/v1"})["id"]
+        self.assertNotIn(reply_actions.CALL,instructions(asr=custom))
+        self.assertIn(reply_actions.CALL,instructions(asr=custom,asr_model="recognizer"))
 
     def test_unknown_sticker_reaches_chat_and_is_recognized_once_across_messages(self):
         self.bind()
@@ -76,7 +102,7 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(cfg["worldbook_id"],ref)
         self.assertEqual(cfg["memory_url"],"http://127.0.0.1:8123")
         self.assertEqual(worldbooks.sections(cfg,[],"在吗"),("常驻背景",""))
-        chat=worker.reply_messages(cfg,"peer",None,"text",[{"type":"text","text":"山茶"}],["微信文字"])
+        chat=worker.reply_messages(cfg,"peer",None,[{"type":"text","text":"山茶"}],["微信文字"])
         call=worker.call_channel.call_messages(cfg,[{"role":"user","content":"刚说到山茶"}],"然后呢")
         for messages in (chat,call):
             self.assertIn("常驻背景",messages[0]["content"])
@@ -106,11 +132,11 @@ class ChannelTest(unittest.TestCase):
         before=datetime(2026,11,26,15,59,tzinfo=timezone.utc)
         after=datetime(2026,11,26,16,0,tzinfo=timezone.utc)
         with patch.object(worker,"history",return_value=recent):
-            plain=worker.reply_messages(cfg,"peer",None,"text",first,["微信文字","微信文字"],now=before)
-            voice=worker.reply_messages(cfg,"peer",None,"voice",mixed,["微信图片","微信语音条（已转写）"],now=after)
-            edited=worker.reply_messages(cfg|{"persona":"新的人设"},"peer",None,"text",first,["微信文字"],now=after)
+            plain=worker.reply_messages(cfg,"peer",None,first,["微信文字","微信文字"],now=before)
+            voice=worker.reply_messages(cfg,"peer",None,mixed,["微信图片","微信语音条（已转写）"],now=after)
+            edited=worker.reply_messages(cfg|{"persona":"新的人设"},"peer",None,first,["微信文字"],now=after)
         self.assertEqual(plain[:-1],voice[:-1])
-        self.assertIn("[laughs]",plain[0]["content"])
+        self.assertNotIn("[laughs]",plain[0]["content"])
         self.assertNotIn("[laughs]",str(voice[-1]["content"]))
         self.assertNotEqual(edited[0],plain[0])
         self.assertEqual(plain[1:-1],recent)
@@ -188,13 +214,34 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(refinement[:-1],draft[:-1])
         first,first_clock=draft[-1]["content"].rsplit(conversation_prompt.CLOCK_HEADER,1)
         second,second_clock=refinement[-1]["content"].rsplit(conversation_prompt.CLOCK_HEADER,1)
-        self.assertTrue(second.startswith(first))
+        self.assertIn(worker.VOICE_REQUEST_NOTE,first)
+        self.assertNotIn(worker.VOICE_REQUEST_NOTE,second)
+        self.assertIn(worker.MISSING_VOICE_NOTE,second)
+        self.assertEqual(second.count(spoken_reply.VOICE_INSTRUCTION),1)
         self.assertEqual(first_clock,second_clock)
-        self.assertIn("只输出台词",second[len(first):])
         self.assertEqual(self.turns()[0]["input"],"发个语音")
         self.assertIn("蛋糕",context)
         self.assertNotIn("私有内容",context)
         self.assertEqual(tts.call_args.args[-1],"留一勺给我。")
+
+    def test_punctuation_and_standalone_sticker_are_complete_replies(self):
+        self.bind()
+        self.incoming("odd","她把闹钟定在起床之后")
+        with patch.object(providers,"chat",return_value="？"):
+            worker.process(self.turns()[0])
+        self.assertEqual(self.deliveries[0][0],{"threadId":"peer","text":"？"})
+
+        self.incoming("again","她又睡过去了")
+        owned={"group":"测试包","label":"捂脸","item":"own","pack":"pack"}
+        with (patch.object(providers,"chat",return_value=reply_actions.STICKER),
+              patch.object(account_stickers,"choose",return_value=owned) as choose,
+              patch.object(account_stickers,"prepare",return_value={"kind":"prepared","preparationId":"fixture"})):
+            worker.process(self.turns()[1])
+        self.assertEqual(len(self.deliveries),2)
+        self.assertEqual(self.deliveries[1][0]["kind"],"sticker")
+        self.assertIn("助手：？",choose.call_args.args[1])
+        self.assertIn("对方这轮：她又睡过去了",choose.call_args.args[1])
+        self.assertEqual(self.turns()[1]["status"],"accepted")
 
     def test_local_ear_uses_independent_transcript_and_an_inline_label(self):
         result=Future();result.set_result(("难过","tagged"))
@@ -399,7 +446,7 @@ class ChannelTest(unittest.TestCase):
             worker.process(self.turns()[0])
         self.assertEqual(submit.call_args_list[0],submit.call_args_list[1])
         self.assertEqual(model.call_count,1)
-        self.assertIn("[laughs]",model.call_args.args[1][0]["content"])
+        self.assertIn("[laughs]",model.call_args.args[1][-1]["content"])
         self.assertEqual(tts.call_args.args[1],"[laughs] 最后一块蛋糕给你。")
         self.assertEqual(tts.call_count,1)
         result=self.turns()[0]
@@ -498,7 +545,7 @@ class ChannelTest(unittest.TestCase):
             parts,lines,sources=worker.input_parts(rows,st.DEFAULT)
             self.assertEqual(worker.input_parts(rows,st.DEFAULT),(parts,lines,sources))
         self.assertEqual(asr.call_count,1)
-        messages=worker.reply_messages(st.DEFAULT,"peer",turn["id"],"text",parts,sources)
+        messages=worker.reply_messages(st.DEFAULT,"peer",turn["id"],parts,sources)
         self.assertIn("讯飞听写已转写",messages[-1]["content"])
         self.assertTrue(messages[-1]["content"].startswith("〔语音转写〕\n名字是青禾"))
         self.assertEqual(lines,["名字是青禾"])

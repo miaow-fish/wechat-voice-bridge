@@ -153,12 +153,17 @@ async function loadBuiltinPrompts(){
   try{
     const entries=await api("builtin-prompts");
     if(request!==promptRequest)return;
-    const sections=entries.map(entry=>{
+    const tools=node("details");
+    tools.open=Boolean(list.querySelector("details[open]"));
+    tools.append(node("summary","按需使用的工具和补充指令"));
+    const scenes=[];
+    for(const entry of entries){
       const section=node("section");
       section.append(node("h3",entry.title),node("p",entry.when),node("pre",entry.text));
-      return section;
-    });
-    list.replaceChildren(...sections);
+      if(entry.kind==="tool")tools.append(section);
+      else scenes.push(section);
+    }
+    list.replaceChildren(...scenes,tools);
   }catch(e){if(request===promptRequest)list.textContent=e.message;}
 }
 el("builtin-prompts").ontoggle=loadBuiltinPrompts;

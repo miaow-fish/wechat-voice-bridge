@@ -333,10 +333,10 @@ def recent_call_turns(history, limit):
     return history[start:]
 
 
-CALL_INSTRUCTIONS = ("这是一通已接通的微信语音电话。你收到的文字是对方刚才讲话的转写，语气标签供你参考。"
-              "你的回答会从对方的听筒播出。用一两句自然的口语回应。"
-              "你可以自己挂断这通电话。想继续聊就正常说话。想结束就自然地道别，"
-              "最后单独写一行 "+END_MARK+"，后台会在你说完后挂断。")
+CALL_INSTRUCTIONS = (
+    "微信电话已接通。你读到的是对方刚说的话，回复会念给对方听。"
+    f"想挂断时先道别，最后单独写一行 {END_MARK}，说完再挂。"
+)
 
 
 def call_messages(cfg, history, current, *, now=None):

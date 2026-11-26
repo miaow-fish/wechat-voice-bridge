@@ -119,6 +119,14 @@ class GroupTest(unittest.TestCase):
         self.assertIn("〔群成员 甲〕\n第一句\n〔群成员 乙〕\n第二句",current)
         self.assertNotIn("另一个群",current)
 
+    def test_quoting_action_names_in_group_text_keeps_the_reply(self):
+        self.add("quote","这两个代号怎么写")
+        reply="例子是 `[[silent]]` 和 `[[call]]`"
+        with patch.object(providers,"chat",return_value=reply), patch.object(call_channel,"start") as dial:
+            worker.process(self.turn("quote"))
+        dial.assert_not_called()
+        self.assertEqual(self.sent,[{"threadId":ROOM,"text":reply}])
+
     def test_mentions_real_metadata_and_replays(self):
         group_chats.configure(ROOM,"mention")
         self.add("other","不读",peer=OTHER)

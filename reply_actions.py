@@ -5,19 +5,6 @@ VOICE = "[[voice]]"
 STICKER = "[[sticker]]"
 CALL = "[[call]]"
 SILENT = "[[silent]]"
-MEDIA_RULES = (
-    f"平常直接写微信聊天内容。需要语音时单独写一行 {VOICE}，下一行写你自己想说的话，"
-    "后台只把那一行合成为原生语音条。自行接着上文说，其他行照常发文字。"
-    f"需要表情时单独写一行 {STICKER}，后台按当前话题从这个微信号下载的表情里选一张。"
-)
-RULES = MEDIA_RULES + (
-    f"对方邀请你打来时，整条只写 {CALL}，后台拨给当前私聊。"
-    "标记是内部动作。普通提问、引用和举例按聊天内容理解，介绍写法时使用行内代码。"
-)
-GROUP_RULES = MEDIA_RULES + (
-    "你是群里的一员。留意谁在和谁说话。别人互相聊天时可以旁听；有人叫你或你有话想接，就自然回应。"
-    f"选择旁听时，整条只写 {SILENT}，微信里不会出现任何气泡。当前会话只支持群内回复。"
-)
 
 # Skip punctuation inside links, inline code and quotations. Newlines in
 # formatted material belong to the example or table and stay together.
@@ -71,6 +58,8 @@ def parse(text):
             fenced=not fenced
             plain.append(line)
             continue
+        if not fenced and value==SILENT:
+            raise ValueError("旁听代号应单独作为整条群聊回复")
         if not fenced and value in (VOICE,STICKER,CALL):
             seen=True
             flush()

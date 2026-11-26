@@ -55,16 +55,30 @@ def api_key(s):
     return s["key"]
 
 
+def configured(s):
+    if s["kind"] == "compatible":
+        return True
+    if s["kind"] == "xfyun":
+        return bool(s["app_id"] and s["secret"] and api_key(s))
+    return bool(api_key(s))
+
+
+def audio_route_ready(cfg, role):
+    field, model_field = MODULE_FIELDS[role]
+    if cfg[field] == "off" or (role == "tts" and not cfg.get("voice")):
+        return False
+    route = service(cfg[field])
+    return (role in KINDS[route["kind"]] and configured(route)
+            and bool(cfg.get(model_field) or route["kind"] in ("xfyun", "deepseek")))
+
+
 def public(s):
     models = {m["id"]:m for m in s["catalog"]}
     for name in s["manual"]:
         models.setdefault(name,{"id":name,"label":name,"uses":[]})
-    ready = bool(api_key(s)) if s["kind"]!="compatible" else True
-    if s["kind"] == "xfyun":
-        ready = ready and bool(s["app_id"] and s["secret"])
     return {k:s[k] for k in ("id","name","kind","base","manual","app_id")} | {
         "models":list(models.values()),"roles":KINDS[s["kind"]],"has_key":bool(api_key(s)),
-        "has_secret":bool(s["secret"]),"configured":ready}
+        "has_secret":bool(s["secret"]),"configured":configured(s)}
 
 
 def all_public(db):
@@ -232,7 +246,8 @@ def missing(s):
 
 
 def has_audio_tags(cfg):
-    return cfg.get("tts_model") in spoken_reply.TAG_MODELS and service(cfg["tts"])["kind"] == "elevenlabs"
+    return (cfg.get("tts", "off") != "off" and bool(cfg.get("voice"))
+            and cfg.get("tts_model") in spoken_reply.TAG_MODELS and service(cfg["tts"])["kind"] == "elevenlabs")
 
 
 def eleven_pcm(s, cfg, text, rate):
