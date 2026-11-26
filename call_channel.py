@@ -93,7 +93,7 @@ def start(mode,*,expected_peer=None,turn_id=None):
         stop_event=Event()
         flag=stop_event
         progress.update(active=True,stage="准备微信通话",received=0,sent=0,replies=0,states=[],
-                        endReason="",hangupSent=False,interruptions=0)
+                        endReason="",hangupSent=False,interruptions=0,sendGeneration=None,latencyMs={})
     def run():
         try:
             asyncio.run(session(mode,peer,cfg,flag))
@@ -149,8 +149,30 @@ class Signal:
         self.owned=None
         self.token=None
         self.states=[]
+        self.send_generations = {}
+        self.clear_pending = None
+        self.audio_ready = asyncio.Event()
+        self.audio_ready.set()
         self.started=time.monotonic()
         self.end_reason="管理页请求结束"
+
+    def observe_send_track(self, track):
+        track_id, generation = track["id"], track["generation"]
+        self.send_generations[track_id] = max(generation, self.send_generations.get(track_id, 0))
+        if self.clear_pending:
+            _, pending_track, old_generation = self.clear_pending
+            if pending_track == track_id and generation > old_generation:
+                self.finish_clear()
+
+    def finish_clear(self):
+        self.clear_pending = None
+        self.audio_ready.set()
+
+    async def clear_audio(self, track_id):
+        request_id = uuid4().hex
+        self.clear_pending = (request_id, track_id, self.send_generations[track_id])
+        self.audio_ready.clear()
+        await send(self.sock, "call.clear_audio", requestId=request_id, callId=self.owned)
 
     def record(self, state):
         if state in CALL_STAGES and (not self.states or self.states[-1]["state"]!=state):
@@ -173,6 +195,13 @@ class Signal:
             self.call[c["callId"]]=c
             if c["callId"]==self.owned:
                 self.record(c.get("state"))
+        elif kind in ("track.added", "track.updated") and self.owned and e.get("callId") == self.owned:
+            track = e["track"]
+            if track.get("media", "audio") == "audio" and track.get("direction") == "send":
+                self.observe_send_track(track)
+        elif kind == "command.result" and self.clear_pending and e.get("requestId") == self.clear_pending[0]:
+            if e.get("status") not in ("accepted", "replayed"):
+                self.finish_clear()
         elif kind=="protocol.error":
             raise ValueError("微信通话控制协议协商失败")
 
@@ -352,6 +381,9 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
            if binary else ready.get("sendTrack"))
     if not track or track.get("format")!=FORMAT:
         raise ValueError("微信通话音频格式不匹配")
+    signal.observe_send_track(track)
+    # A fresh attachment supplies the daemon's current generation, even after a missed update.
+    signal.finish_clear()
     receive={t["id"]:t["generation"] for t in ready["receiveTracks"] if t.get("media","audio")=="audio"}
     audio=SpeechBuffer()
     pending=bytearray()
@@ -381,7 +413,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             t=ev["track"]
             if t.get("media","audio")!="audio": return
             if t.get("direction")=="send" and t["id"]==track["id"]:
-                track["generation"]=t["generation"]
+                signal.observe_send_track(t)
             elif t.get("direction")=="receive":
                 receive[t["id"]]=t["generation"]
         elif ev.get("type")=="track.removed":
@@ -423,7 +455,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                         cue_result=sensevoice_local.start(cue_input)
                     if playing:
                         totals["interruptions"]+=1
-                        await send(signal.sock,"call.clear_audio",requestId=uuid4().hex,callId=signal.owned)
+                        await signal.clear_audio(track["id"])
                         change(stage="正在听你说",**totals)
                     if cfg.get("_call_iat"):
                         live=voice_iat.LiveDictation(cfg)
@@ -438,7 +470,6 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     async def play(out,turn,timing=None):
         nonlocal started,playing
         if epoch!=turn or flag.is_set(): return False
-        playing=True
         interrupted=advanced
         async def chunks():
             if isinstance(out,bytes):
@@ -446,11 +477,16 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             else:
                 async for block in out: yield block
         async def pump():
-            nonlocal started
+            nonlocal started,playing
             first=True
             deadline=None
             async for block in chunks():
                 if deadline is None:
+                    # Old-generation PCM is silently dropped by the WeChat daemon.
+                    try:
+                        await asyncio.wait_for(signal.audio_ready.wait(), 6)
+                    except TimeoutError:
+                        raise RuntimeError("微信未确认发送音轨，重新连接音频") from None
                     if timing:
                         # Finish dictation early, but reserve the conversational
                         # pause for a continuation until the first samples play.
@@ -458,10 +494,13 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                     deadline=time.monotonic()
                 for pos in range(0,len(block),640):
                     if flag.is_set() or epoch!=turn: return False
-                    if started!=track["generation"]:
-                        await send(media,"track.start" if binary else "audio.start",trackId=track["id"],generation=track["generation"])
-                        started=track["generation"]
+                    generation = signal.send_generations[track["id"]]
+                    if started != generation:
+                        await send(media,"track.start" if binary else "audio.start",trackId=track["id"],generation=generation)
+                        started=generation
+                        change(sendGeneration=generation)
                     samples=block[pos:pos+640]
+                    playing=True
                     if binary:
                         await media.send(pcm_frame(track["id"],started,samples))
                     else:

@@ -131,6 +131,79 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e["type"] for e in ctl.sent],["call.clear_audio"])
         self.assertFalse(signal.flag.is_set())
 
+    async def test_two_control_only_interruptions_keep_the_next_reply_audible(self):
+        ctl, media = Socket(), Socket()
+        signal = calls.Signal(ctl, Event())
+        signal.owned = "ours"
+        signal.call["ours"] = {"state": "connected"}
+        ready = {"protocolVersion": 3,
+                 "sendTracks": [{"media": "audio", "id": 1, "generation": 1, "format": calls.FORMAT}],
+                 "receiveTracks": [{"media": "audio", "id": 2, "generation": 1}]}
+        speech = calls.pcm_frame(2, 1, struct.pack("<h", 1800) * 320 * 10 + bytes(640 * 45))
+        clips = [struct.pack("<h", level) * 320 for level in (1200, 2000, 2800)]
+        generation, started = 1, None
+        starts, audible, discarded = [], [], []
+
+        def end():
+            ctl.event({"type": "call.state", "call": {"callId": "ours", "state": "ended"}})
+
+        def control(event):
+            nonlocal generation
+            if event["type"] == "call.clear_audio":
+                generation += 1
+                # The native daemon publishes the audio send revision on the control socket.
+                ctl.event({"type": "track.updated", "callId": "ours", "track": {
+                    "media": "audio", "direction": "send", "id": 1, "generation": generation}})
+
+        def receive(frame):
+            nonlocal started
+            if isinstance(frame, dict):
+                if frame["type"] == "track.start":
+                    started = frame["generation"]
+                    starts.append(started)
+                return
+            _, actual, samples = calls.read_frame(frame)
+            if actual != generation or started != generation:
+                discarded.append((actual, generation))
+                end()
+                return
+            audible.append(samples)
+            if len(audible) <= 2:
+                media.event(speech)
+            elif b"".join(audible).endswith(calls.CHIME):
+                end()
+
+        ctl.on_send, media.on_send = control, receive
+        media.event(speech)
+        with patch.object(providers, "recognize_pcm", return_value="嗯"), \
+             patch.object(providers, "chat", return_value="听见了"), \
+             patch.object(providers, "synthesize_pcm", side_effect=[clips[0] * 30, clips[1] * 30, clips[2]]):
+            await asyncio.wait_for(calls.conversation(signal, media, ready, st.DEFAULT | {"call_cue": "on"}, signal.flag), 6)
+        self.assertEqual(discarded, [])
+        self.assertEqual(starts, [1, 2, 3])
+        self.assertEqual(b"".join(audible), b"".join(clips) + calls.CHIME)
+
+    async def test_send_track_waits_for_its_own_revision_after_clear(self):
+        ctl = Socket()
+        signal = calls.Signal(ctl, Event())
+        signal.owned = "ours"
+        track = {"direction": "send", "id": 1, "generation": 4}
+        signal.observe_send_track(track)
+        await signal.clear_audio(1)
+        request = ctl.sent[-1]["requestId"]
+        signal.observe({"type": "command.result", "requestId": request, "status": "accepted"})
+        event = {"type": "track.updated", "callId": "ours", "track": track | {"generation": 5}}
+        signal.observe(event | {"callId": "someone-else"})
+        signal.observe(event | {"track": event["track"] | {"direction": "receive"}})
+        self.assertFalse(signal.audio_ready.is_set())
+        signal.observe(event)
+        self.assertTrue(signal.audio_ready.is_set())
+        signal.observe_send_track(track)
+        self.assertEqual(signal.send_generations[1], 5)
+        await signal.clear_audio(1)
+        signal.observe({"type": "command.result", "requestId": ctl.sent[-1]["requestId"], "status": "rejected"})
+        self.assertTrue(signal.audio_ready.is_set())
+
     async def test_first_tts_chunk_plays_before_provider_finishes(self):
         ctl,media=Socket(),Socket()
         signal=calls.Signal(ctl,Event());signal.owned="ours"
