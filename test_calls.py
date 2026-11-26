@@ -68,8 +68,9 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
 
         def listen(frame):
             if isinstance(frame, bytes):
+                first_write = not received
                 received.extend(calls.read_frame(frame)[2])
-                if received == first:
+                if first_write:
                     media.event(speech)
                 if received.endswith(calls.CHIME):
                     ctl.event({"type": "call.state", "call": {"callId": "ours", "state": "ended"}})
@@ -129,6 +130,57 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
                                    st.DEFAULT | {"_tts_client": object()}, signal.flag), 3)
         self.assertEqual(received, first + tail)
         self.assertLess(max(gaps), .035)
+
+    async def test_native_playout_survives_a_sender_stall_and_drains_before_goodbye(self):
+        ctl, media = Socket(), Socket()
+        gate = Event()
+        signal = calls.Signal(ctl, gate)
+        signal.owned = "ours"
+        signal.call["ours"] = {"state": "connected"}
+        ready = {"protocolVersion": 3,
+                 "sendTracks": [{"media": "audio", "id": 1, "generation": 1, "format": calls.FORMAT}],
+                 "receiveTracks": [{"media": "audio", "id": 2, "generation": 1}]}
+        media.event(calls.pcm_frame(2, 1, struct.pack("<h", 1800)*320*9 + bytes(640*45)))
+        # Distinguishable frames and a short tail. The daemon can only play whole frames.
+        pcm = b"".join(struct.pack("<h", number)*320 for number in range(1, 66)) + b"\x27\x00"*13
+        presented = bytearray()
+        clock = asyncio.get_running_loop().time
+        queued_until = max_gap = peak_queue = 0.0
+        stalled = False
+
+        async def native_send(message):
+            nonlocal queued_until, max_gap, peak_queue, stalled
+            if not isinstance(message, bytes):
+                return
+            if not stalled and len(presented) >= 32*640:
+                stalled = True
+                await asyncio.sleep(.330)
+            samples = calls.read_frame(message)[2]
+            now = clock()
+            if presented:
+                max_gap = max(max_gap, now-queued_until)
+            queued_until = max(queued_until, now) + len(samples)/32000
+            peak_queue = max(peak_queue, queued_until-now)
+            presented.extend(samples)
+
+        async def synthesize(*_):
+            # The network may split a sample or frame across successive reads.
+            for block in (pcm[:701], pcm[701:24773], pcm[24773:]):
+                yield block
+
+        media.send = native_send
+        cfg = st.DEFAULT | {"call_barge_in": False, "_tts_client": object()}
+        with patch.object(providers, "recognize_pcm", return_value="那晚安"), \
+             patch.object(providers, "chat", return_value="晚安\n"+calls.END_MARK), \
+             patch.object(providers, "stream_call_pcm", synthesize), patch.object(calls, "TURN_PAUSE", 0):
+            await asyncio.wait_for(calls.conversation(signal, media, ready, cfg, gate, own_control=False), 4)
+        self.assertTrue(stalled)
+        self.assertEqual(presented, pcm.ljust(66*640, b"\0"))
+        self.assertLess(max_gap, .045)
+        self.assertGreater(peak_queue, .35)
+        self.assertLess(peak_queue, calls.NATIVE_QUEUE_SECONDS + .03)
+        self.assertGreaterEqual(clock(), queued_until)
+        self.assertEqual(signal.end_reason, "助手已道别")
 
     def test_history_counts_user_turns_when_a_spoken_reply_is_interrupted(self):
         history = [

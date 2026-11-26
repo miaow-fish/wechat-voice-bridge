@@ -26,11 +26,12 @@ FORMAT={"sampleRate":16000,"channels":1,"frameMs":20}
 PCM_HEADER=struct.Struct(">4sBBHIIQQI")
 END_PAUSE=0.48
 TURN_PAUSE=0.9
-# Keep a short reserve before the native 20 ms playback clock, with at most
-# three frames handed to the daemon ahead of time (its jitter queue is finite).
-PCM_RESERVE_BYTES = 16 * 640
+PCM_FRAME_BYTES = 640
+PCM_RESERVE_BYTES = 16 * PCM_FRAME_BYTES
 PCM_PRIME_WAIT = 0.200
-NATIVE_LEAD = 0.060
+# v3 accepts variable-size chunks and clocks them out of its own PCM queue.
+NATIVE_WRITE_BYTES = 8 * PCM_FRAME_BYTES
+NATIVE_QUEUE_SECONDS = 0.560
 END_MARK="[[END_CALL]]"
 CHIME=bytes(640)+b"".join(struct.pack("<h",round(1300*math.sin(2*math.pi*720*i/16000)
                           *math.sin(math.pi*i/1600)**2)) for i in range(1600))
@@ -381,7 +382,7 @@ def call_messages(cfg, history, current, *, now=None):
     return conversation_prompt.build(cfg,instructions,recent_call_turns(history,limit),current,now=now,private=True)
 
 
-async def buffered_call_audio(source):
+async def buffered_call_audio(source, reserve_bytes=PCM_RESERVE_BYTES, prime_wait=PCM_PRIME_WAIT):
     """Read synthesis independently of the playback clock; keep the buffer bounded."""
     if isinstance(source, bytes):
         if source:
@@ -404,10 +405,10 @@ async def buffered_call_audio(source):
     try:
         block = await queue.get()
         reserve = bytearray()
-        deadline = asyncio.get_running_loop().time() + PCM_PRIME_WAIT
+        deadline = asyncio.get_running_loop().time() + prime_wait
         while isinstance(block, bytes):
             reserve.extend(block)
-            if len(reserve) >= PCM_RESERVE_BYTES:
+            if len(reserve) >= reserve_bytes:
                 break
             try:
                 async with asyncio.timeout_at(deadline):
@@ -425,6 +426,25 @@ async def buffered_call_audio(source):
     finally:
         reader.cancel()
         await asyncio.gather(reader, return_exceptions=True)
+
+
+async def call_audio_writes(source, queue_in_daemon):
+    """Preserve sample order across provider chunks; flush the final partial daemon frame."""
+    chunk_bytes = NATIVE_WRITE_BYTES if queue_in_daemon else PCM_FRAME_BYTES
+    reserve_bytes = round(NATIVE_QUEUE_SECONDS * pcm_audio.BYTES_PER_SECOND) if queue_in_daemon else PCM_RESERVE_BYTES
+    prime_wait = .350 if queue_in_daemon else PCM_PRIME_WAIT
+    tail = b""
+    async with aclosing(buffered_call_audio(source, reserve_bytes, prime_wait)) as blocks:
+        async for block in blocks:
+            data = tail + block
+            whole = len(data) - len(data) % PCM_FRAME_BYTES
+            for start in range(0, whole, chunk_bytes):
+                yield data[start:min(start + chunk_bytes, whole)]
+            tail = data[whole:]
+    if len(tail) % 2:
+        raise ValueError("通话音频在半个采样处结束")
+    if tail:
+        yield tail.ljust(PCM_FRAME_BYTES, b"\0")
 
 
 async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=True,history=None):
@@ -529,30 +549,32 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
         nonlocal started,playing
         if superseded(turn) or flag.is_set(): return False
         interrupted=advanced
-        async def pump(blocks):
+        queue_in_daemon=binary and not barge_in
+        async def pump():
             nonlocal started,playing
             first=True
             deadline=None
-            async for block in blocks:
-                if deadline is None:
-                    # Old-generation PCM is silently dropped by the WeChat daemon.
-                    try:
-                        await asyncio.wait_for(signal.audio_ready.wait(), 6)
-                    except TimeoutError:
-                        raise RuntimeError("微信未确认发送音轨，重新连接音频") from None
-                    if timing:
-                        # Finish dictation early, but reserve the conversational
-                        # pause for a continuation until the first samples play.
-                        await asyncio.sleep(max(0,timing[0]+TURN_PAUSE-time.monotonic()))
-                    deadline=time.monotonic()
-                for pos in range(0,len(block),640):
+            async with aclosing(call_audio_writes(out,queue_in_daemon)) as writes:
+                async for samples in writes:
+                    if first:
+                        # Old-generation PCM is silently dropped by the WeChat daemon.
+                        try:
+                            await asyncio.wait_for(signal.audio_ready.wait(), 6)
+                        except TimeoutError:
+                            raise RuntimeError("微信未确认发送音轨，重新连接音频") from None
+                        if timing:
+                            await asyncio.sleep(max(0,timing[0]+TURN_PAUSE-time.monotonic()))
+                        deadline=time.monotonic()
+                    duration=len(samples)/pcm_audio.BYTES_PER_SECOND
+                    if queue_in_daemon:
+                        # The native client consumes this reserve even if Python or TTS stalls.
+                        await asyncio.sleep(max(0,deadline+duration-NATIVE_QUEUE_SECONDS-time.monotonic()))
                     if flag.is_set() or superseded(turn): return False
                     generation = signal.send_generations[track["id"]]
                     if started != generation:
                         await send(media,"track.start" if binary else "audio.start",trackId=track["id"],generation=generation)
                         started=generation
                         change(sendGeneration=generation)
-                    samples=block[pos:pos+640]
                     playing=True
                     if binary:
                         await media.send(pcm_frame(track["id"],started,samples))
@@ -561,25 +583,25 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                                    pcmBase64=base64.b64encode(samples).decode())
                     now=time.monotonic()
                     if first and timing is not None:
-                        change(latencyMs={"停顿":round((timing[1]-timing[0])*1000),
-                                          "听写收尾":round((timing[2]-timing[1])*1000),
-                                          "生成回复":round((timing[3]-timing[2])*1000),
-                                          "合成首帧":round((now-timing[3])*1000),
-                                          "到第一帧":round((now-timing[0])*1000)})
+                        last_voice,sealed,dequeued,transcribed,written=timing
+                        change(latencyMs={"停顿":round((sealed-last_voice)*1000),
+                                          "排队":round((dequeued-sealed)*1000),
+                                          "听写收尾":round((transcribed-dequeued)*1000),
+                                          "生成回复":round((written-transcribed)*1000),
+                                          "合成首帧":round((now-written)*1000),
+                                          "到第一帧":round((now-last_voice)*1000)})
                     if not first:
                         totals["maxFeedGapMs"]=max(totals["maxFeedGapMs"],round((now-deadline)*1000))
                     first=False
-                    totals["sent"]+=1
-                    deadline=max(deadline,now)+len(samples)/pcm_audio.BYTES_PER_SECOND
-                    # Give the receive/control tasks time even while filling the initial reserve.
-                    await asyncio.sleep(max(.004,deadline-NATIVE_LEAD+0.020-time.monotonic()))
+                    totals["sent"]+=len(samples)//PCM_FRAME_BYTES
+                    deadline=max(deadline,now)+duration
+                    if not queue_in_daemon:
+                        # Keep interruptible and v2 playback responsive to a generation change.
+                        await asyncio.sleep(max(.004,deadline-.040-time.monotonic()))
             if deadline is not None:
                 await asyncio.sleep(max(0,deadline-time.monotonic()))
             return not first and not superseded(turn) and not flag.is_set()
-        async def play_buffered():
-            async with aclosing(buffered_call_audio(out)) as blocks:
-                return await pump(blocks)
-        task=asyncio.create_task(play_buffered())
+        task=asyncio.create_task(pump())
         interrupt=asyncio.create_task(interrupted.wait())
         try:
             done,_=await asyncio.wait((task,interrupt),return_when=asyncio.FIRST_COMPLETED)
@@ -616,6 +638,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
         fragments=[]
         while not flag.is_set():
             turn,raw,stream,cue,sealed,last_voice=await queue.get()
+            dequeued=time.monotonic()
             try:
                 fragments.append(await transcribe(raw,stream,cue))
                 transcribed=time.monotonic()
@@ -640,7 +663,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             if superseded(turn): continue
             sent_before=totals["sent"]
             try:
-                complete=await play(out,turn,(last_voice,sealed,transcribed,written))
+                complete=await play(out,turn,(last_voice,sealed,dequeued,transcribed,written))
             except (OSError,ValueError,TimeoutError):
                 change(stage="语音合成暂时中断，通话保持中")
                 continue
