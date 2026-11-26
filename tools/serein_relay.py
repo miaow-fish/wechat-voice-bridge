@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import build_opener, HTTPRedirectHandler, ProxyHandler, Request
 
@@ -44,8 +45,23 @@ def relay(core, window, path, data):
         if (not isinstance(query, str) or not 0 < len(query) <= 16000 or not isinstance(ids, list)
                 or len(ids) > 100 or not all(isinstance(i, str) and len(i) <= 300 for i in ids)):
             raise ValueError
-        row = core.call("/api/hook/recall", {"session_id": window, "query": query, "max_notes": 2,
-                                             "delivered_ids": ids, "max_context_chars": 2400})
+        hook = "/api/hook/recall"
+        options = {"session_id": window, "query": query, "max_notes": 2,
+                   "delivered_ids": ids, "max_context_chars": 2400}
+        try:
+            row = core.call(hook, options)
+        except HTTPError as error:
+            with error:
+                if error.code != 400:
+                    raise
+                try:
+                    detail = json.loads(error.read(2048))
+                except ValueError:
+                    detail = None
+            if detail != {"detail": "Semantic query provider is not configured"}:
+                raise
+            # Serein still matches authored preference keywords when the note budget is zero.
+            row = core.call(hook, {**options, "max_notes": 0})
         if not row.get("ok") or not isinstance(row.get("additional_context"), str) or not isinstance(row.get("recalled_ids"), list):
             raise RuntimeError
         return {"ok": True, "note": row["additional_context"], "ids": row["recalled_ids"]}

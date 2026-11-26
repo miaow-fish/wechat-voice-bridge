@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 from zipfile import ZipFile
 
 import call_channel
@@ -110,6 +111,32 @@ class PrivateMemoryTest(unittest.TestCase):
         self.assertIsNone(memory.recall(current["id"],"friend",["已经换绑"]))
         self.assertFalse(memory.flush())
         self.remote.assert_not_called()
+
+    def test_unconfigured_semantic_search_still_returns_matching_preferences(self):
+        core = Mock()
+        window = self.link["window"]
+        request = {"window": window, "query": "我喝茶有什么讲究", "delivered_ids": ["event:previous"]}
+        hook = "/api/hook/recall"
+        core.call.side_effect = [
+            HTTPError(hook, 400, "", {}, BytesIO(b'{"detail":"Semantic query provider is not configured"}')),
+            {"ok": True, "additional_context": "喜欢淡茶", "recalled_ids": []},
+        ]
+        result = serein_relay.relay(core, window, "/recall", request)
+        self.assertEqual(result, {"ok": True, "note": "喜欢淡茶", "ids": []})
+        first, second = core.call.call_args_list
+        self.assertEqual(first.args[0], hook)
+        self.assertEqual(first.args[1]["max_notes"], 2)
+        self.assertEqual(second.args, (hook, {**first.args[1], "max_notes": 0}))
+
+    def test_other_recall_failures_are_reported_without_retry(self):
+        for code, body in ((400, b'{"detail":"invalid query"}'), (400, b'invalid'), (401, b''), (503, b'')):
+            with self.subTest(code=code, body=body):
+                core = Mock()
+                core.call.side_effect = HTTPError("/api/hook/recall", code, "", {}, BytesIO(body))
+                window = self.link["window"]
+                with self.assertRaises(HTTPError):
+                    serein_relay.relay(core, window, "/recall", {"window": window, "query": "茶", "delivered_ids": []})
+                core.call.assert_called_once()
 
     def test_relay_scopes_each_event_and_forwards_only_acknowledged_ids(self):
         core=Mock()
