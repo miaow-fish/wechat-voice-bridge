@@ -141,6 +141,7 @@ def save_profile(data):
         if (len(cfg["voice"])>220 or any(ord(c)<32 for c in cfg["voice"])
                 or cfg["asr_language"] not in ("zh_cn","en_us") or cfg["note_rate"] not in ("16000","24000")
                 or cfg["call_cue"] not in ("off","on") or cfg["sticker_vision"] not in ("off","once")
+                or cfg["call_reasoning_effort"] not in ("default","low")
                 or cfg["tone_format"] not in ("input_audio","audio_url") or cfg["asr_accent"] not in ("mandarin","cantonese")):
             raise ValueError("请检查声音与表情设置")
         cfg["memory_url"]=cfg["memory_url"].strip()

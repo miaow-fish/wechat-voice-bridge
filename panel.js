@@ -220,6 +220,11 @@ function renderModules(){
     list.value=cfg[providerField];const selected=service(list.value);
     list.onchange=()=>{capture();cfg[modelField]="";if(role==="tts")cfg.voice=list.value==="deepseek"?"tide":""; renderModules();};
     grid.append(label("服务商",list),modelControl(role,selected,modelField));row.append(grid);
+    if(role==="chat" && selected?.kind==="compatible" && /^gpt-5/i.test(cfg.chat_model)){
+      const effort=node("select");effort.name="call_reasoning_effort";
+      effort.append(option("default","模型默认"),option("low","低 · 优先接话速度"));effort.value=cfg.call_reasoning_effort;
+      row.append(label("电话里的推理强度",effort));
+    }
     if(role==="tone"){
       if(list.value==="local-sensevoice"){
         row.append(node("p",live.local_tone_available?"用已选听写转文字，本机从同一段原音提取语气。":"本机语气服务暂不可用，继续使用已选听写。"));
@@ -335,6 +340,7 @@ function applyState(s,force=false,discard=[]){
   el("syncStickers").disabled=!s.logged;
   const call=s.call||{};el("callStatus").textContent=(call.stage||"尚未测试")+" · 收到音频 "+((call.received||0)*.02).toFixed(1)+" 秒 · 发出音频 "+((call.sent||0)*.02).toFixed(1)+" 秒";
   if(Number.isFinite(call.latencyMs?.["到第一帧"]))el("callStatus").textContent+=" · 上一轮开口用时 "+(call.latencyMs["到第一帧"]/1000).toFixed(1)+" 秒";
+  if(Number.isFinite(call.greetingMs))el("callStatus").textContent+=" · 接通到问候 "+(call.greetingMs/1000).toFixed(1)+" 秒";
   if(call.maxFeedGapMs>20)el("callStatus").textContent+=" · 本机播放供音最长中断 "+call.maxFeedGapMs+" 毫秒";
   if(!call.active){
     if(call.receiptAt||call.states?.length)el("callStatus").textContent="最近一通 · "+el("callStatus").textContent;

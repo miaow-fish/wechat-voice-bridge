@@ -4,6 +4,8 @@ import base64
 import json
 import struct
 from threading import Event
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +34,103 @@ class Socket:
 
 
 class DirectCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unsaid_draft_yields_to_a_correction_while_thinking_or_waiting_for_audio(self):
+        for waiting_for in ("model","voice"):
+            with self.subTest(waiting_for=waiting_for):
+                ctl,media=Socket(),Socket()
+                signal=calls.Signal(ctl,Event())
+                signal.owned="ours"
+                signal.call["ours"]={"state":"connected"}
+                ready={"protocolVersion":3,"sendTracks":[{"id":1,"media":"audio","format":calls.FORMAT,"generation":1}],
+                       "receiveTracks":[{"id":2,"media":"audio","generation":1}]}
+                heard=calls.pcm_frame(2,1,struct.pack("<h",1500)*320*9+bytes(640*26))
+                media.event(heard)
+                inputs=[]
+                spoken=[]
+                cancelled=asyncio.Event()
+                actual=b"\x09\x00"*320*4
+
+                async def wait_for_correction():
+                    media.event(heard)
+                    try:
+                        await asyncio.Future()
+                    finally:
+                        cancelled.set()
+
+                async def model(cfg,messages):
+                    inputs.append(messages)
+                    if len(inputs)==1:
+                        if waiting_for=="model":
+                            await wait_for_correction()
+                        return "那就周一见\n"+calls.END_MARK
+                    return "好，周三见"
+
+                async def voice(client,cfg,words):
+                    spoken.append(words)
+                    if words=="那就周一见":
+                        await wait_for_correction()
+                    yield actual
+
+                received=bytearray()
+                def sent(frame):
+                    if isinstance(frame,bytes):
+                        received.extend(calls.read_frame(frame)[2])
+                        if received.endswith(calls.CHIME):
+                            ctl.event({"type":"call.state","call":{"callId":"ours","state":"ended"}})
+
+                media.on_send=sent
+                cfg=st.DEFAULT|{"call_barge_in":False,"call_cue":"on","_tts_client":object()}
+                with patch.object(providers,"recognize_pcm",side_effect=["周一见","我说错了，周三"]), \
+                     patch.object(providers,"call_chat",model),patch.object(providers,"stream_call_pcm",voice), \
+                     patch.object(calls,"TURN_PAUSE",0):
+                    await asyncio.wait_for(calls.conversation(signal,media,ready,cfg,signal.flag),3)
+                self.assertTrue(cancelled.is_set())
+                self.assertEqual(len(inputs),2)
+                self.assertIn("周一见\n我说错了，周三",inputs[-1][-1]["content"])
+                self.assertNotIn("那就周一见",str(inputs[-1]))
+                self.assertEqual(received,actual+calls.CHIME)
+                self.assertEqual(ctl.sent,[])
+
+    async def test_greeting_is_cached_for_only_the_configured_voice(self):
+        cfg=st.DEFAULT|{"_call_tts":{"id":"test","base":"https://example.invalid"},"voice":"a"}
+        first,second=bytes([1,0])*320,bytes([2,0])*320
+        with TemporaryDirectory() as tmp,patch.object(st,"ROOT",Path(tmp)), \
+             patch.object(providers,"synthesize_pcm",side_effect=[first,second]) as tts:
+            st.init()
+            self.assertEqual(await calls.greeting_pcm(cfg),first)
+            self.assertEqual(await calls.greeting_pcm(cfg),first)
+            self.assertEqual(await calls.greeting_pcm(cfg|{"voice":"b"}),second)
+            self.assertEqual(tts.call_count,2)
+
+    def test_second_hearing_is_a_note_only_for_meaningful_short_disagreements(self):
+        self.assertEqual(calls.alternative_hearing("天气不错。","天气不错"),"")
+        self.assertEqual(calls.alternative_hearing("啊？",""),"")
+        self.assertEqual(calls.alternative_hearing("小舟","小周"),"小周")
+        self.assertEqual(calls.alternative_hearing("这一句话足够长不用比较两个全文","我记得还有很多要讨论的事情"),"")
+        current=calls.call_messages(st.DEFAULT,[],"小舟",notes=["听写有分歧，本机听成「小周」。"])[-1]["content"]
+        self.assertTrue(current.startswith("小舟\n"))
+        self.assertIn("〔系统附注〕\n听写有分歧",current)
+
+    async def test_mandarin_accepts_provider_revisions_and_keeps_other_languages_compatible(self):
+        for language,accent,revise in (("zh_cn","mandarin",True),("zh_cn","cantonese",False),("en_us","",False)):
+            sent=[]
+            class DictationSocket:
+                async def __aenter__(self): return self
+                async def __aexit__(self,*_): return None
+                async def send(self,data): sent.append(json.loads(data))
+                async def __aiter__(self):
+                    await asyncio.sleep(0)
+                    for sn,word in enumerate(("桥","明天","乔")):
+                        result={"sn":sn,"ws":[{"cw":[{"w":word}]}]}
+                        if sn==2: result.update(pgs="rpl",rg=[0,1])
+                        yield json.dumps({"code":0,"data":{"result":result,"status":2 if sn==2 else 1}})
+            async def audio():
+                yield bytes(1280)
+            with patch("websockets.asyncio.client.connect",return_value=DictationSocket()), \
+                 patch.object(voice_iat,"signed_url",return_value="wss://example.invalid"):
+                self.assertEqual(await voice_iat.recognize_stream(audio(),{"app_id":"test"},language,accent),"乔")
+            self.assertEqual(sent[0]["business"].get("dwa"),"wpgs" if revise else None)
+
     async def test_final_dictation_reaches_chat_before_socket_teardown(self):
         closing = asyncio.Event()
         cfg = st.DEFAULT | {"_call_iat": {}}

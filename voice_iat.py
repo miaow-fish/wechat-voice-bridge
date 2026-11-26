@@ -37,6 +37,8 @@ async def recognize_stream(chunks, credentials, language, accent, *, on_final=No
                     business={"language":language,"domain":"iat"}
                     if language=="zh_cn":
                         business["accent"]=accent
+                        if accent=="mandarin":
+                            business["dwa"]="wpgs"
                     sample.update(common={"app_id":credentials["app_id"]}, business=business)
                     first=False
                 await socket.send(json.dumps(sample))

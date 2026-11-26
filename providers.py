@@ -241,6 +241,40 @@ def chat(cfg, messages, *, vision=False):
     return text.strip()
 
 
+async def call_chat(cfg, messages):
+    """A pending HTTP request belongs to one unspoken turn and can be cancelled."""
+    if "_chat_client" not in cfg:
+        return await asyncio.to_thread(chat,cfg,messages)
+    import aiohttp
+    s=cfg["_call_chat"]
+    name=model_id(cfg["chat_model"])
+    body={"model":name,"messages":messages,"stream":False}
+    if s["kind"]=="deepseek":
+        body.update(thinking={"type":"disabled"},max_tokens=768)
+    elif cfg.get("call_reasoning_effort")=="low" and name.lower().startswith("gpt-5"):
+        body["reasoning_effort"]="low"
+    token=api_key(s)
+    headers={"Authorization":"Bearer "+token} if token else {}
+    try:
+        async with cfg["_chat_client"].post(s["base"]+"/chat/completions",json=body,headers=headers,
+                                             allow_redirects=False,timeout=aiohttp.ClientTimeout(total=60,sock_connect=8)) as response:
+            if response.status!=200:
+                raise ValueError("通话对话服务返回错误 "+str(response.status))
+            data=bytearray()
+            async for chunk in response.content.iter_chunked(65536):
+                data.extend(chunk)
+                if len(data)>12*1024*1024:
+                    raise ValueError("通话对话服务返回的数据过大")
+            result=json.loads(data)
+    except aiohttp.ClientError as exc:
+        raise ValueError("通话对话服务连接中断") from exc
+    choice=result["choices"][0]
+    text=choice["message"]["content"]
+    if not isinstance(text,str) or not text.strip() or (s["kind"]=="deepseek" and choice.get("finish_reason")!="stop"):
+        raise ValueError("通话模型回复不完整")
+    return text.strip()
+
+
 def missing(s):
     raise ValueError("请先配置"+s["name"]+"的凭据")
 

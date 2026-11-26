@@ -5,6 +5,8 @@ from collections import deque
 from concurrent.futures import Future
 from contextlib import AsyncExitStack, aclosing
 from datetime import datetime
+from difflib import SequenceMatcher
+from hashlib import sha256
 import json
 from importlib.util import find_spec
 import math
@@ -182,8 +184,11 @@ def start(mode,*,expected_peer=None,turn_id=None,expected_offer=None):
         raise ValueError("自动接听已关闭")
     if not peer or not wx().get("authenticated"):
         raise ValueError("请先登录并绑定私聊")
-    if not providers.public(providers.service(cfg["chat_service"]))["configured"]:
+    chat_service=providers.service(cfg["chat_service"])
+    if not providers.public(chat_service)["configured"]:
         raise ValueError("请先配置对话模型")
+    if find_spec("aiohttp"):
+        cfg["_call_chat"]=chat_service
     for role in ("asr","tts"):
         if cfg[role]=="off" or not providers.public(providers.service(cfg[role]))["configured"]:
             raise ValueError("请先配置语音识别与合成服务")
@@ -191,6 +196,7 @@ def start(mode,*,expected_peer=None,turn_id=None,expected_offer=None):
     if asr["kind"]=="xfyun" and cfg["tone_service"] in ("off",sensevoice_local.ROUTE):
         cfg["_call_iat"]=asr
     tts=providers.service(cfg["tts"])
+    cfg["_call_tts"]=tts
     if tts["kind"]=="elevenlabs" and find_spec("aiohttp"):
         cfg["_call_eleven"]=tts
     cfg["_peer"]=peer
@@ -215,7 +221,8 @@ def start(mode,*,expected_peer=None,turn_id=None,expected_offer=None):
         progress.clear()
         progress.update(active=True,stage="准备微信通话",received=0,sent=0,replies=0,states=[],
                         direction="incoming" if mode=="answer" else "outgoing",receiptAt=None,actionAccepted=False,mediaReady=False,
-                        endReason="",hangupSent=False,interruptions=0,sendGeneration=None,latencyMs={},maxFeedGapMs=0)
+                        endReason="",hangupSent=False,interruptions=0,sendGeneration=None,latencyMs={},
+                        turnTimings=[],greetingMs=None,joinedDrafts=0,maxFeedGapMs=0)
     def run():
         try:
             asyncio.run(session(mode,peer,cfg,flag))
@@ -280,6 +287,7 @@ class Signal:
         self.audio_ready = asyncio.Event()
         self.audio_ready.set()
         self.started=time.monotonic()
+        self.connected_at=None
         self.end_reason="管理页请求结束"
 
     def observe_send_track(self, track):
@@ -302,6 +310,8 @@ class Signal:
 
     def record(self, state):
         if state in CALL_STAGES and (not self.states or self.states[-1]["state"]!=state):
+            if state=="connected" and self.connected_at is None:
+                self.connected_at=time.monotonic()
             self.states.append({"state":state,"seconds":round(time.monotonic()-self.started,1)})
             change(stage=CALL_STAGES[state],states=list(self.states))
 
@@ -502,14 +512,37 @@ def recent_call_turns(history, limit):
 
 CALL_INSTRUCTIONS = (
     "微信电话已接通。你读到的是对方刚说的话，回复会念给对方听。"
+    "按最后补充或纠正的意思自然接话。听写有分歧时结合前后文，关键信息听不清才简短确认。只凭转写无法判断声源或网络故障。"
     f"想挂断时先道别，最后单独写一行 {END_MARK}，说完再挂。"
 )
 
 
-def call_messages(cfg, history, current, *, now=None):
+def call_messages(cfg, history, current, *, notes=(), now=None):
     limit=cfg.get("history_turns",st.DEFAULT["history_turns"])
     instructions=providers.voice_instructions(cfg,CALL_INSTRUCTIONS)
-    return conversation_prompt.build(cfg,instructions,recent_call_turns(history,limit),current,now=now,private=True)
+    return conversation_prompt.build(cfg,instructions,recent_call_turns(history,limit),current,notes=notes,now=now,private=True)
+
+
+def alternative_hearing(primary, local):
+    """Flag a material disagreement on a short utterance without rewriting what was heard."""
+    def letters(text):
+        return "".join(c for c in text.casefold() if c.isalnum())
+    first,second=letters(primary),letters(local)
+    if not first or not second or max(len(first),len(second))>10 or first==second:
+        return ""
+    return local if SequenceMatcher(None,first,second).ratio()<.8 else ""
+
+
+async def draft_until_speech(cfg,messages,new_speech):
+    request=asyncio.create_task(providers.call_chat(cfg,messages))
+    heard=asyncio.create_task(new_speech.wait())
+    try:
+        await asyncio.wait((request,heard),return_when=asyncio.FIRST_COMPLETED)
+        return None if new_speech.is_set() else request.result()
+    finally:
+        heard.cancel()
+        request.cancel()
+        await asyncio.gather(request,heard,return_exceptions=True)
 
 
 async def buffered_call_audio(source, reserve_bytes=PCM_RESERVE_BYTES, prime_wait=PCM_PRIME_WAIT):
@@ -591,7 +624,8 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     pending=bytearray()
     queue=asyncio.Queue()
     history=[] if history is None else history
-    totals={k:snapshot().get(k,0) for k in ("received","sent","replies","interruptions","maxFeedGapMs")}
+    totals={k:snapshot().get(k,0) for k in ("received","sent","replies","interruptions","joinedDrafts","maxFeedGapMs")}
+    timings=deque(snapshot().get("turnTimings",[]),maxlen=60)
     started=None
     epoch=0
     barge_in=cfg.get("call_barge_in",st.DEFAULT["call_barge_in"])
@@ -601,9 +635,6 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     live=None
     cue_input=cue_result=None
     iat_tasks=set()
-
-    def superseded(turn):
-        return barge_in and turn != epoch
 
     def enqueue(raw):
         nonlocal live,cue_input,cue_result
@@ -655,13 +686,12 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 raw=audio.feed(frame)
                 if audio.confirmed and not was:
                     speech_began.set()
-                    if barge_in:
-                        advanced.set()
-                        advanced=asyncio.Event()
+                    advanced.set()
+                    advanced=asyncio.Event()
                     epoch+=1
                     if cfg.get("tone_service")==sensevoice_local.ROUTE:
                         cue_input=Future()
-                        cue_result=sensevoice_local.start(cue_input)
+                        cue_result=sensevoice_local.start(cue_input,with_words=True)
                     if playing and barge_in:
                         totals["interruptions"]+=1
                         await signal.clear_audio(track["id"])
@@ -679,11 +709,12 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
 
     async def play(out,turn,timing=None):
         nonlocal started,playing
-        if superseded(turn) or flag.is_set(): return False
+        if turn!=epoch or flag.is_set(): return False
         interrupted=advanced
+        committed=False
         queue_in_daemon=binary and not barge_in
         async def pump():
-            nonlocal started,playing
+            nonlocal started,playing,committed
             first=True
             deadline=None
             async with aclosing(call_audio_writes(out,queue_in_daemon)) as writes:
@@ -701,13 +732,14 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                     if queue_in_daemon:
                         # The native client consumes this reserve even if Python or TTS stalls.
                         await asyncio.sleep(max(0,deadline+duration-NATIVE_QUEUE_SECONDS-time.monotonic()))
-                    if flag.is_set() or superseded(turn): return False
+                    if flag.is_set() or (turn!=epoch and (barge_in or not committed)): return False
                     generation = signal.send_generations[track["id"]]
                     if started != generation:
                         await send(media,"track.start" if binary else "audio.start",trackId=track["id"],generation=generation)
                         started=generation
                         change(sendGeneration=generation)
-                    playing=True
+                    if first and turn!=epoch: return False
+                    playing=committed=True
                     if binary:
                         await media.send(pcm_frame(track["id"],started,samples))
                     else:
@@ -716,12 +748,16 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                     now=time.monotonic()
                     if first and timing is not None:
                         last_voice,sealed,dequeued,transcribed,written=timing
-                        change(latencyMs={"停顿":round((sealed-last_voice)*1000),
+                        latency={"停顿":round((sealed-last_voice)*1000),
                                           "排队":round((dequeued-sealed)*1000),
                                           "听写收尾":round((transcribed-dequeued)*1000),
                                           "生成回复":round((written-transcribed)*1000),
                                           "合成首帧":round((now-written)*1000),
-                                          "到第一帧":round((now-last_voice)*1000)})
+                                          "到第一帧":round((now-last_voice)*1000)}
+                        timings.append(dict(turn=turn,**latency))
+                        change(latencyMs=latency,turnTimings=list(timings))
+                    elif first and turn==0 and signal.connected_at is not None:
+                        change(greetingMs=round((now-signal.connected_at)*1000))
                     if not first:
                         totals["maxFeedGapMs"]=max(totals["maxFeedGapMs"],round((now-deadline)*1000))
                     first=False
@@ -732,12 +768,14 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                         await asyncio.sleep(max(.004,deadline-.040-time.monotonic()))
             if deadline is not None:
                 await asyncio.sleep(max(0,deadline-time.monotonic()))
-            return not first and not superseded(turn) and not flag.is_set()
+            return committed and (not barge_in or turn==epoch) and not flag.is_set()
         task=asyncio.create_task(pump())
         interrupt=asyncio.create_task(interrupted.wait())
         try:
             done,_=await asyncio.wait((task,interrupt),return_when=asyncio.FIRST_COMPLETED)
-            return task.result() if task in done else False
+            if task in done or (committed and not barge_in):
+                return await task
+            return False
         finally:
             task.cancel(); interrupt.cancel()
             await asyncio.gather(task,interrupt,return_exceptions=True)
@@ -747,19 +785,29 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             change(**totals)
 
     async def transcribe(raw,stream,cue):
-        if stream:
-            words=await stream.transcript()
-        elif cfg.get("tone_service","off") in ("off",sensevoice_local.ROUTE):
-            words=await asyncio.to_thread(providers.recognize_pcm,cfg,raw)
-        else:
+        if not stream and cfg.get("tone_service","off") not in ("off",sensevoice_local.ROUTE):
             words,tone,_,_=await asyncio.to_thread(providers.hear_utterance,cfg,raw)
-            return providers.with_tone(words,tone)
-        tone=""
+            return providers.with_tone(words,tone),""
+        try:
+            words=await stream.transcript() if stream else await asyncio.to_thread(providers.recognize_pcm,cfg,raw)
+        except (OSError,ValueError,TimeoutError,ConnectionClosed):
+            words=""
+        tone=local=""
         if cue:
             try:
-                tone,_=await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cue)),.12)
+                tone,_,local=await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cue)),.12)
             except TimeoutError: pass
-        return providers.with_tone(words,tone)
+        if not words and not local:
+            return "〔这段语音没听清〕",""
+        return providers.with_tone(words or local,tone),alternative_hearing(words,local)
+
+    async def call_output(delivery):
+        if cfg.get("_tts_client"):
+            async with aclosing(providers.stream_call_pcm(cfg["_tts_client"],cfg,delivery)) as stream:
+                async for block in stream:
+                    yield block
+        else:
+            yield await asyncio.to_thread(providers.synthesize_pcm,cfg,delivery)
 
     async def reply():
         if greeting is not None:
@@ -782,37 +830,36 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             try:
                 fragments.append(await transcribe(raw,stream,cue))
                 transcribed=time.monotonic()
-                # Combine queued continuations before starting a new reply.
-                # Once a reply is underway, the user's interruption setting applies.
                 if turn!=epoch: continue
-                msg={"role":"user","content":"\n".join(fragments)}
-                draft=await asyncio.to_thread(providers.chat,cfg,call_messages(cfg,history,msg["content"]))
+                msg={"role":"user","content":"\n".join(words for words,_ in fragments)}
+                notes=[f"第{n}段听写有分歧，本机听成「{alt}」。" for n,(_,alt) in enumerate(fragments,1) if alt]
+                draft=await draft_until_speech(cfg,call_messages(cfg,history,msg["content"],notes=notes),advanced)
+                if draft is None or turn!=epoch:
+                    totals["joinedDrafts"]+=1
+                    continue
                 answer,finish=end_decision(draft)
-                if superseded(turn) or not answer: continue
+                if not answer: continue
                 spoken=spoken_reply.parse(answer)
                 answer=spoken.words
                 delivery=spoken.delivery if providers.has_audio_tags(cfg) else answer
                 written=time.monotonic()
-                if cfg.get("_tts_client"):
-                    out=providers.stream_call_pcm(cfg["_tts_client"],cfg,delivery)
-                else:
-                    out=await asyncio.to_thread(providers.synthesize_pcm,cfg,delivery)
             except (OSError,ValueError,TimeoutError,KeyError,IndexError,ConnectionClosed):
                 change(stage="通话中，正在等你继续说")
                 continue
-            if superseded(turn): continue
             sent_before=totals["sent"]
             try:
-                complete=await play(out,turn,(last_voice,sealed,dequeued,transcribed,written))
+                complete=await play(call_output(delivery),turn,(last_voice,sealed,dequeued,transcribed,written))
             except (OSError,ValueError,TimeoutError):
                 change(stage="语音合成暂时中断，通话保持中")
-                continue
+                complete=False
             if totals["sent"]>sent_before:
                 fragments.clear()
                 history.append(msg)
                 if complete:
                     history.append({"role":"assistant","content":answer})
                 history[:]=recent_call_turns(history,cfg.get("history_turns",st.DEFAULT["history_turns"]))
+            elif turn!=epoch:
+                totals["joinedDrafts"]+=1
             if not complete: continue
             totals["replies"]+=1
             if cfg.get("_peer"):
@@ -824,7 +871,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 if epoch==turn and not audio.confirmed:
                     signal.end_reason=finish
                     flag.set()
-            elif cfg.get("call_cue")=="on" and not superseded(turn):
+            elif cfg.get("call_cue")=="on" and turn==epoch:
                 await play(CHIME,turn)
             change(**totals)
 
@@ -877,33 +924,63 @@ async def connected_session(signal,cfg,flag,greeting,connect,headers):
         await asyncio.gather(watcher,audio,return_exceptions=True)
 
 
+GREETING="喂，听得见吗？"
+
+
+def greeting_cache(key, pcm=None):
+    """Only the fixed greeting is cached, with one entry for the current voice."""
+    try:
+        with st.database() as db:
+            if pcm is not None:
+                st.put(db,"call_greeting_pcm",{"key":key,"pcm":base64.b64encode(pcm).decode("ascii")})
+            else:
+                saved=st.get(db,"call_greeting_pcm",{})
+                if saved.get("key")==key:
+                    return pcm_audio.checked(base64.b64decode(saved["pcm"],validate=True),15)
+    except (sqlite3.Error,ValueError,KeyError,TypeError):
+        pass
+    return None
+
+
 async def greeting_pcm(cfg):
-    text = "喂，听得见吗？"
-    if not cfg.get("_tts_client"):
-        return await asyncio.to_thread(providers.synthesize_pcm, cfg, text)
-    audio = bytearray()
-    async for block in providers.stream_call_pcm(cfg["_tts_client"], cfg, text):
-        audio.extend(block)
-    return bytes(audio)
+    route=cfg.get("_call_tts",{})
+    key=sha256(json.dumps([route.get("id"),route.get("base"),cfg.get("tts_model"),
+                           cfg.get("voice"),GREETING,FORMAT],sort_keys=True).encode()).hexdigest()
+    if route:
+        cached=await asyncio.to_thread(greeting_cache,key)
+        if cached:
+            return cached
+    if cfg.get("_tts_client"):
+        audio=bytearray()
+        async for block in providers.stream_call_pcm(cfg["_tts_client"],cfg,GREETING):
+            audio.extend(block)
+        pcm=bytes(audio)
+    else:
+        pcm=await asyncio.to_thread(providers.synthesize_pcm,cfg,GREETING)
+    if route and 0<len(pcm)<=15*pcm_audio.BYTES_PER_SECOND:
+        await asyncio.to_thread(greeting_cache,key,pcm)
+    return pcm
 
 
 async def session(mode,peer,cfg,flag):
     from websockets.asyncio.client import connect
     headers={"Authorization":"Bearer "+TOKEN.read_text().strip()}
     async with connect(BASE+"/socket",additional_headers=headers,proxy=None,open_timeout=6) as ctl, AsyncExitStack() as resources:
-        if cfg.get("_call_eleven"):
+        if cfg.get("_call_eleven") or cfg.get("_call_chat"):
             import aiohttp
             client=await resources.enter_async_context(aiohttp.ClientSession(
                 trust_env=False, connector=aiohttp.TCPConnector(keepalive_timeout=75),
                 timeout=aiohttp.ClientTimeout(total=50,sock_connect=8,sock_read=15)))
-            cfg=dict(cfg,_tts_client=client)
+            cfg=dict(cfg,_chat_client=client)
+            if cfg.get("_call_eleven"):
+                cfg["_tts_client"]=client
         signal=Signal(ctl,flag)
         greeting=None
         try:
-            if mode=="dial":
+            if mode=="dial" or cfg.get("_incoming_offer"):
                 greeting=asyncio.create_task(greeting_pcm(cfg))
             await signal.claim(mode,peer,expected_offer=cfg.get("_incoming_offer"))
-            if mode=="answer":
+            if greeting is None:
                 greeting=asyncio.create_task(greeting_pcm(cfg))
             await connected_session(signal,cfg,flag,greeting,connect,headers)
             if not flag.is_set():

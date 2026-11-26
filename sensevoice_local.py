@@ -29,28 +29,31 @@ def local_cue(pcm):
         conn.connect(str(SOCKET))
         if isinstance(pcm,Future):
             pcm=pcm.result(timeout=20)
-            if not pcm: return "","uncertain"
+            if not pcm: return "","uncertain",""
         conn.sendall(pcm)
         conn.shutdown(socket.SHUT_WR)
         with conn.makefile("rb") as response:
-            data=response.readline(128)
-        tone=json.loads(data)["tone"]
+            data=json.loads(response.readline(4096))
+        tone=data["tone"]
         if tone and tone not in LABELS.values():
             raise ValueError("未知语气标签")
-        return tone,"tagged" if tone else "uncertain"
+        words=data.get("words","")
+        return tone,"tagged" if tone else "uncertain",words if isinstance(words,str) else ""
 
 
-def start(pcm):
+def start(pcm, *, with_words=False):
     future=Future()
+    def finish(tone,status,words=""):
+        future.set_result((tone,status,words) if with_words else (tone,status))
     if not SLOT.acquire(blocking=False):
-        future.set_result(("","busy"))
+        finish("","busy")
         return future
 
     def run():
         try:
-            future.set_result(local_cue(pcm))
+            finish(*local_cue(pcm))
         except (OSError,ValueError,KeyError,TypeError):
-            future.set_result(("","unavailable"))
+            finish("","unavailable")
         finally:
             SLOT.release()
     Thread(target=run,daemon=True).start()
@@ -70,8 +73,9 @@ def classify(pcm,model):
 
     samples=np.frombuffer(pcm,dtype="<i2").astype(np.float32)/32768
     if not np.any(samples):
-        return ""
+        return {"tone":"","words":""}
     tones=set()
+    words=""
     # Bound attention memory and avoid attributing a mixed recording to one mood.
     pieces=(len(samples)+8*RATE-1)//(8*RATE)
     for piece in np.array_split(samples,pieces):
@@ -81,9 +85,12 @@ def classify(pcm,model):
         result=s.result
         if result.text.strip():
             tones.add(LABELS.get(result.emotion,""))
+            if pieces==1:
+                words=result.text.strip()[:256]
         if "" in tones or len(tones)>1:
-            return ""
-    return next(iter(tones),"")
+            break
+    tone=next(iter(tones)) if len(tones)==1 else ""
+    return {"tone":tone,"words":words}
 
 
 if __name__=="__main__":
@@ -93,4 +100,4 @@ if __name__=="__main__":
     raw=sys.stdin.buffer.read(LIMIT+1)
     if not raw or len(raw)>LIMIT or len(raw)%2:
         raise SystemExit(2)
-    print(json.dumps({"tone":classify(raw,model)},ensure_ascii=False),flush=True)
+    print(json.dumps(classify(raw,model),ensure_ascii=False),flush=True)
