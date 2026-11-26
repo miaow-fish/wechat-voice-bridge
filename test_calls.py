@@ -34,6 +34,43 @@ class Socket:
 
 
 class DirectCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_slow_voice_preconnection_never_delays_the_reply(self):
+        ctl,media=Socket(),Socket()
+        signal=calls.Signal(ctl,Event())
+        signal.owned="ours"
+        signal.call["ours"]={"state":"connected"}
+        ready={"protocolVersion":3,"sendTracks":[{"media":"audio","id":1,"generation":1,"format":calls.FORMAT}],
+               "receiveTracks":[{"media":"audio","id":2,"generation":1}]}
+        cfg=st.DEFAULT|{"_tts_client":object(),"_call_eleven":{"id":"fixture"}}
+        media.event(calls.pcm_frame(2,1,struct.pack("<h",1500)*320*10+bytes(640*26)))
+        attempts=[]
+        started=asyncio.Event()
+        closed=asyncio.Event()
+
+        async def prepare(client,cfg):
+            attempts.append(1)
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                closed.set()
+
+        async def voice(client,cfg,text):
+            self.assertTrue(started.is_set())
+            yield bytes(640)
+
+        def hear(frame):
+            if isinstance(frame,bytes):
+                ctl.event({"type":"call.state","call":{"callId":"ours","state":"ended"}})
+
+        media.on_send=hear
+        with patch.object(providers,"prepare_call_voice",prepare),patch.object(providers,"stream_call_pcm",voice), \
+             patch.object(providers,"recognize_pcm",return_value="早上好"),patch.object(providers,"chat",return_value="早"), \
+             patch.object(calls,"TURN_PAUSE",0):
+            await asyncio.wait_for(calls.conversation(signal,media,ready,cfg,signal.flag),2)
+        self.assertEqual(len(attempts),1)
+        self.assertTrue(closed.is_set())
+
     async def test_unsaid_draft_yields_to_a_correction_while_thinking_or_waiting_for_audio(self):
         for waiting_for in ("model","voice"):
             with self.subTest(waiting_for=waiting_for):
@@ -103,6 +140,9 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tts.call_count,2)
 
     def test_second_hearing_is_a_note_only_for_meaningful_short_disagreements(self):
+        local={"words":"wait","language":"<|en|>"}
+        self.assertEqual(calls.sensevoice_local.heard_words(local,"zh_cn"),"")
+        self.assertEqual(calls.sensevoice_local.heard_words(local,"en_us"),"wait")
         self.assertEqual(calls.alternative_hearing("天气不错。","天气不错"),"")
         self.assertEqual(calls.alternative_hearing("啊？",""),"")
         self.assertEqual(calls.alternative_hearing("小舟","小周"),"小周")

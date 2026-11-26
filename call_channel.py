@@ -635,6 +635,18 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     live=None
     cue_input=cue_result=None
     iat_tasks=set()
+    voice_preparation=None
+    voice_used_at=None
+
+    def prepare_voice():
+        nonlocal voice_preparation,voice_used_at
+        if not cfg.get("_call_eleven") or not cfg.get("_tts_client"):
+            return
+        now=time.monotonic()
+        if (voice_preparation and not voice_preparation.done()) or (voice_used_at is not None and now-voice_used_at<25):
+            return
+        voice_used_at=now
+        voice_preparation=asyncio.create_task(providers.prepare_call_voice(cfg["_tts_client"],cfg))
 
     def enqueue(raw):
         nonlocal live,cue_input,cue_result
@@ -686,12 +698,14 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 raw=audio.feed(frame)
                 if audio.confirmed and not was:
                     speech_began.set()
+                    prepare_voice()
                     advanced.set()
                     advanced=asyncio.Event()
                     epoch+=1
                     if cfg.get("tone_service")==sensevoice_local.ROUTE:
                         cue_input=Future()
-                        cue_result=sensevoice_local.start(cue_input,with_words=True)
+                        cue_result=sensevoice_local.start(cue_input,with_words=True,
+                                                         language=cfg.get("asr_language") if cfg.get("_call_iat") else None)
                     if playing and barge_in:
                         totals["interruptions"]+=1
                         await signal.clear_audio(track["id"])
@@ -802,10 +816,14 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
         return providers.with_tone(words or local,tone),alternative_hearing(words,local)
 
     async def call_output(delivery):
+        nonlocal voice_used_at
         if cfg.get("_tts_client"):
-            async with aclosing(providers.stream_call_pcm(cfg["_tts_client"],cfg,delivery)) as stream:
-                async for block in stream:
-                    yield block
+            try:
+                async with aclosing(providers.stream_call_pcm(cfg["_tts_client"],cfg,delivery)) as stream:
+                    async for block in stream:
+                        yield block
+            finally:
+                voice_used_at=time.monotonic()
         else:
             yield await asyncio.to_thread(providers.synthesize_pcm,cfg,delivery)
 
@@ -875,6 +893,7 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 await play(CHIME,turn)
             change(**totals)
 
+    prepare_voice()
     tasks=[asyncio.create_task(listen()),asyncio.create_task(reply())]
     if own_control: tasks.append(asyncio.create_task(signal.watch_end()))
     try:
@@ -883,6 +902,8 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
     finally:
         if cue_input is not None and not cue_input.done():
             cue_input.set_result(b"")
+        if voice_preparation is not None:
+            tasks.append(voice_preparation)
         for t in tasks+list(iat_tasks): t.cancel()
         await asyncio.gather(*tasks,*iat_tasks,return_exceptions=True)
         change(**totals)

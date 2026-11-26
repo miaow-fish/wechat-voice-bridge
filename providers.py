@@ -296,9 +296,28 @@ def eleven_pcm(s, cfg, text, rate):
     path="/text-to-speech/"+quote(cfg["voice"],safe="")+"?output_format=pcm_"+str(rate)
     return request(s,path,{"text":text,"model_id":model_id(cfg["tts_model"])},binary=True,pcm_response=True,pcm_rate=rate)
 
+def call_voice_url(cfg):
+    return cfg["_call_eleven"]["base"]+"/text-to-speech/"+quote(cfg["voice"],safe="")+"/stream?output_format=pcm_16000"
+
+
+async def prepare_call_voice(client,cfg):
+    """Open the pooled TLS connection without submitting speech for synthesis."""
+    import aiohttp
+    try:
+        async with client.options(call_voice_url(cfg),allow_redirects=False,
+                                  timeout=aiohttp.ClientTimeout(total=6)) as res:
+            size=0
+            async for chunk in res.content.iter_chunked(2048):
+                size+=len(chunk)
+                if size>8192:
+                    break
+    except (aiohttp.ClientError,OSError,ValueError):
+        pass
+
+
 async def stream_call_pcm(client,cfg,text):
     s=cfg["_call_eleven"]
-    url=s["base"]+"/text-to-speech/"+quote(cfg["voice"],safe="")+"/stream?output_format=pcm_16000"
+    url=call_voice_url(cfg)
     payload={"text":text,"model_id":model_id(cfg["tts_model"])}
     async with client.post(url,json=payload,headers={"xi-api-key":api_key(s)},allow_redirects=False) as res:
         if res.status!=200 or res.content_type not in ("audio/pcm","audio/x-pcm","audio/raw","application/octet-stream"):

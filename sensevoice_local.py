@@ -23,7 +23,15 @@ def installed():
     return SOCKET.is_socket() and os.access(SOCKET,os.W_OK)
 
 
-def local_cue(pcm):
+def heard_words(result,language):
+    expected={"zh_cn":"<|zh|>","en_us":"<|en|>"}.get(language)
+    words=result.get("words","")
+    if expected and result.get("language")!=expected:
+        return ""
+    return words if isinstance(words,str) else ""
+
+
+def local_cue(pcm,language):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as conn:
         conn.settimeout(15)
         conn.connect(str(SOCKET))
@@ -37,11 +45,10 @@ def local_cue(pcm):
         tone=data["tone"]
         if tone and tone not in LABELS.values():
             raise ValueError("未知语气标签")
-        words=data.get("words","")
-        return tone,"tagged" if tone else "uncertain",words if isinstance(words,str) else ""
+        return tone,"tagged" if tone else "uncertain",heard_words(data,language)
 
 
-def start(pcm, *, with_words=False):
+def start(pcm, *, with_words=False,language=None):
     future=Future()
     def finish(tone,status,words=""):
         future.set_result((tone,status,words) if with_words else (tone,status))
@@ -51,7 +58,7 @@ def start(pcm, *, with_words=False):
 
     def run():
         try:
-            finish(*local_cue(pcm))
+            finish(*local_cue(pcm,language))
         except (OSError,ValueError,KeyError,TypeError):
             finish("","unavailable")
         finally:
@@ -75,7 +82,7 @@ def classify(pcm,model):
     if not np.any(samples):
         return {"tone":"","words":""}
     tones=set()
-    words=""
+    words=language=""
     # Bound attention memory and avoid attributing a mixed recording to one mood.
     pieces=(len(samples)+8*RATE-1)//(8*RATE)
     for piece in np.array_split(samples,pieces):
@@ -87,10 +94,11 @@ def classify(pcm,model):
             tones.add(LABELS.get(result.emotion,""))
             if pieces==1:
                 words=result.text.strip()[:256]
+                language=result.lang
         if "" in tones or len(tones)>1:
             break
     tone=next(iter(tones)) if len(tones)==1 else ""
-    return {"tone":tone,"words":words}
+    return {"tone":tone,"words":words,"language":language}
 
 
 if __name__=="__main__":
