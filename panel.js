@@ -25,6 +25,7 @@ function showPage(){
   el("pageTitle").textContent=pages[page][0];el("pageDesc").textContent=pages[page][1];
   document.title=pages[page][0]+" · 微信助手";document.querySelector(".rail").classList.remove("menu-open");
   el("menuButton").setAttribute("aria-expanded","false");window.scrollTo(0,0);
+  if(page==="connect" && live?.group_account)startGroupsOnce();
 }
 el("menuButton").onclick=()=>el("menuButton").setAttribute("aria-expanded",String(document.querySelector(".rail").classList.toggle("menu-open")));
 window.addEventListener("hashchange",showPage);
@@ -44,18 +45,24 @@ async function api(path,data){
 }
 async function withButton(b,work,feedback=notice){b.disabled=true;try{await work();}catch(e){feedback(e.message);}finally{b.disabled=false;}}
 function service(id){return live.providers.find(s=>s.id===id);}
-const availableGroups = new Map();
-let groupCursor = "", groupListLoaded = false, lastRoutes;
-function showGroups(routes) {
-  const list=el("groupList");
+const availableGroups = new Map(), unverifiedGroups = new Map();
+let groupCursor = "", groupChecked = "", groupBusy = false, groupAttempted = false;
+let groupEpoch = 0, catalogComplete = true, groupError = "", lastRoutes;
+function resetGroups() {
+  groupEpoch++;
+  availableGroups.clear();unverifiedGroups.clear();
+  groupCursor="";groupChecked="";groupBusy=false;groupAttempted=false;
+  catalogComplete=true;groupError="";lastRoutes=undefined;
+}
+function renderGroupRows(list, groups, routes, verified) {
   list.replaceChildren();
-  const groups=new Map(availableGroups);
-  for(const [id,entry] of Object.entries(routes)) groups.set(id,entry.name);
   for(const [id,name] of groups) {
+    const mode=routes[id]?.mode || "off";
+    if(!verified && mode==="off"){list.append(node("div",name));continue;}
     const control=node("select");
     for(const [value,title] of [["off","关闭"],["auto","由助手决定"],["mention","仅 @助手 时参与"]])
-      control.append(option(value,title));
-    control.value=routes[id]?.mode || "off";
+      if(verified || value==="off" || value===mode)control.append(option(value,title));
+    control.value=mode;
     control.onchange=async()=>{
       const mode=control.value;
       control.disabled=true;
@@ -65,19 +72,49 @@ function showGroups(routes) {
     };
     list.append(label(name,control));
   }
-  const count=Object.keys(routes).length;
-  el("groupState").textContent=groupListLoaded&&!groups.size?"微信账号还没有可选的群":
-    count?"已启用 "+count+" 个群":"尚未启用群聊";
-  el("readGroups").textContent=groupCursor?"查看更多群":groupListLoaded?"刷新群列表":"选择微信群";
 }
-el("readGroups").onclick=e=>withButton(e.currentTarget,async()=>{
-  const page=await api("groups"+(groupCursor?"?cursor="+encodeURIComponent(groupCursor):""));
-  if(!groupCursor) availableGroups.clear();
-  for(const item of page.items) availableGroups.set(item.id,item.name);
-  groupCursor=page.nextCursor || "";
-  groupListLoaded=true;
-  showGroups(live.group_routes || {});
-});
+function showGroups(routes) {
+  const unverified=new Map(unverifiedGroups);
+  if(groupChecked && !groupCursor){
+    for(const [id,route] of Object.entries(routes)){
+      if(!availableGroups.has(id) && !unverified.has(id))unverified.set(id,route.name);
+    }
+  }
+  renderGroupRows(el("groupList"),availableGroups,routes,true);
+  renderGroupRows(el("unverifiedList"),unverified,routes,false);
+  el("unverifiedGroups").hidden=!unverified.size;
+  el("unverifiedTitle").textContent="暂未确认的群（"+unverified.size+"）";
+  el("readGroups").disabled=!live?.group_account || groupBusy;
+  el("moreGroups").hidden=!groupCursor;el("moreGroups").disabled=groupBusy;
+  let status="登录后可查看群聊";
+  if(groupChecked)status=groupChecked+" 已核对 · 已确认 "+availableGroups.size+" 个群"+(catalogComplete?"":" · 群目录尚未同步完整");
+  if(groupBusy)status="正在向微信核对群聊…";
+  el("groupState").textContent=groupError || status;
+}
+async function loadGroups(more=false) {
+  if(groupBusy || !live?.group_account || (more && !groupCursor))return;
+  const epoch=groupEpoch;
+  groupBusy=true;groupAttempted=true;groupError="";showGroups(live.group_routes || {});
+  try{
+    const page=more?await api("groups?cursor="+encodeURIComponent(groupCursor)):await api("groups/refresh",{});
+    if(epoch!==groupEpoch)return;
+    if(!more){availableGroups.clear();unverifiedGroups.clear();catalogComplete=page.catalogComplete;}
+    for(const item of page.unverified){
+      availableGroups.delete(item.id);unverifiedGroups.set(item.id,item.name);
+    }
+    for(const item of page.items){
+      unverifiedGroups.delete(item.id);availableGroups.set(item.id,item.name);
+    }
+    groupCursor=page.nextCursor || "";
+    groupChecked=new Date().toLocaleTimeString("zh-CN",{hour12:false});
+  }catch(e){if(epoch===groupEpoch)groupError="群列表刷新失败："+e.message;}
+  finally{if(epoch===groupEpoch){groupBusy=false;showGroups(live.group_routes || {});}}
+}
+function startGroupsOnce(){
+  if(!groupAttempted)loadGroups();
+}
+el("readGroups").onclick=()=>loadGroups();
+el("moreGroups").onclick=()=>loadGroups(true);
 const mergeSwitch = el("mergeMessages"), mergeSeconds = el("mergeSeconds");
 mergeSeconds.max = String(Number.MAX_SAFE_INTEGER);
 function syncMergeControls() {
@@ -229,10 +266,11 @@ function applyState(s,force=false,discard=[]){
   const changes=cfg?changedSettings():{};
   for(const key of discard)delete changes[key];
   const updated=JSON.stringify(s.settings)!==JSON.stringify(baseline);
+  if(live?.group_account!==s.group_account)resetGroups();
   live=s;
   const routes=JSON.stringify(s.group_routes || {});
   if(routes!==lastRoutes){showGroups(s.group_routes || {});lastRoutes=routes;}
-  el("readGroups").disabled=!s.logged;
+  if(s.group_account && !el("connect").hidden)startGroupsOnce();
   baseline={...s.settings};cfg={...baseline,...changes};
   const stamp=JSON.stringify([s.providers,s.library,s.local_tone_available]);
   if(force||updated||stamp!==controlStamp){

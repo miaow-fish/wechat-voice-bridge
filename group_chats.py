@@ -9,14 +9,39 @@ from wechat_case import esc, wx
 
 
 def list_page(cursor=""):
-    path = "/groups?limit=60"
+    own = wx().get("ownUsername")
+    if not own:
+        raise ValueError("请先登录助手微信")
+    path = "/groups?limit=10"
     page = wx(path + ("&cursor=" + esc(cursor) if cursor else ""))
-    items = [
-        {"id": item["id"], "name": item.get("displayName") or item["id"]}
-        for item in page.get("items", [])
-        if item.get("id") and not item.get("deleted") and item.get("isInGroup") is not False
-    ]
-    return {"items": items, "nextCursor": page.get("nextCursor")}
+    items, unverified = [], []
+    for item in page.get("items", []):
+        room = item.get("id")
+        if not room or item.get("deleted") or item.get("isInGroup") is False:
+            continue
+        entry = {"id": room, "name": item.get("displayName") or room}
+        try:
+            roster = wx("/groups/" + esc(room) + "/lookup?version=0")
+            confirmed = roster.get("id") == room and any(
+                member.get("id") == own for member in roster.get("items", [])
+            )
+        except (URLError, TimeoutError, ValueError):
+            confirmed = False
+        (items if confirmed else unverified).append(entry)
+    return {"items": items, "unverified": unverified, "nextCursor": page.get("nextCursor")}
+
+
+def refresh_page():
+    # The catalog is incremental and retains old rooms. Check membership even
+    # when catalog sync is partial so a stale row cannot prove membership.
+    operation = wx("/group-sync", {})
+    deadline = time.monotonic() + 12
+    while operation.get("state") in ("pending", "queued", "running", "accepted") and time.monotonic() < deadline:
+        time.sleep(.4)
+        operation = wx("/operations/" + esc(operation["id"]))
+    page = list_page()
+    page["catalogComplete"] = operation.get("state") == "succeeded" and operation.get("result", {}).get("complete") is True
+    return page
 
 
 def configure(peer, mode):

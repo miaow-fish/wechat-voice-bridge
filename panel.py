@@ -170,7 +170,9 @@ def state():
         call=call_channel.snapshot()
         if "states" not in call:
             call=st.get(db,"last_call",call)
+        own = acct.get("ownUsername")
         return {"logged": bool(acct.get("authenticated")), "paired": bool(st.get(db, "peer")),
+                "group_account":sha256(own.encode()).hexdigest()[:16] if own and acct.get("authenticated") else None,
                 "paircode":pair.get("code") if acct.get("authenticated") and not st.get(db,"peer") and pair.get("expires",0)>time.time() else None,
                 "key": public_key(db), "models":st.get(db, "models", []), "settings":st.profile(db),
                 "group_routes":st.get(db,"group_routes",{}),
@@ -245,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, begin_login())
             if path == "/api/pair":
                 return self.reply(200, pairing())
+            if path == "/api/groups/refresh":
+                return self.reply(200,group_chats.refresh_page())
             if path == "/api/groups":
                 return self.reply(200,group_chats.configure(data.get("id"),data.get("mode")))
             if path == "/api/settings":

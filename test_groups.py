@@ -42,11 +42,12 @@ class GroupTest(unittest.TestCase):
     def wx(self, path="", data=None, idem=None):
         from urllib.parse import unquote
         path = unquote(path)
-        if not path: return {"authenticated":True}
+        if not path: return {"authenticated":True,"ownUsername":"assistant"}
         if path.startswith("/groups?"):
             return {"items":[{"id":ROOM,"displayName":"测试群"}, {"id":OTHER,"deleted":True}], "nextCursor":"page2"}
         if path.startswith("/groups/"):
             room = path.split("/")[2]
+            if "/lookup?" in path: return {"id":room,"items":[{"id":"assistant"}]}
             if "/members/" in path:
                 member = path.split("/")[-1]
                 return {"member":{"id":member,"roomDisplayName":{"a":"甲","b":"乙"}[member]}}
@@ -171,6 +172,36 @@ class GroupTest(unittest.TestCase):
         self.assertEqual(group_chats.list_page()["items"],[{"id":ROOM,"name":"测试群"}])
         with self.assertRaises(ValueError): group_chats.configure("friend","auto")
         with self.assertRaises(ValueError): group_chats.configure("left@chatroom","auto")
+
+    def test_refresh_checks_current_membership_and_uses_the_latest_group_name(self):
+        def native(path="",data=None):
+            if not path: return {"ownUsername":"assistant"}
+            if path=="/group-sync": return {"id":"operation","state":"queued"}
+            if path=="/operations/operation": return {"state":"succeeded","result":{"complete":True}}
+            if path.startswith("/groups?"): return {"items":[
+                {"id":ROOM,"displayName":"新群名"},{"id":OTHER,"displayName":"旧群名"}]}
+            if "/lookup?" in path:
+                room=ROOM if "other" not in path else OTHER
+                return {"id":room,"items":[{"id":"assistant"}] if room==ROOM else []}
+            self.fail(path)
+        with patch.object(group_chats,"wx",side_effect=native), patch.object(group_chats.time,"sleep"):
+            page=group_chats.refresh_page()
+        self.assertTrue(page["catalogComplete"])
+        self.assertEqual(page["items"],[{"id":ROOM,"name":"新群名"}])
+        self.assertEqual(page["unverified"],[{"id":OTHER,"name":"旧群名"}])
+
+    def test_lookup_timeout_preserves_unverified_route_and_pagination(self):
+        original=self.wx
+        def native(path="",data=None):
+            if "/lookup?" in path: raise TimeoutError()
+            return original(path,data)
+        with patch.object(group_chats,"wx",side_effect=native) as calls:
+            page=group_chats.list_page("next page")
+        calls.assert_any_call("/groups?limit=10&cursor=next%20page")
+        self.assertEqual(page["items"],[])
+        self.assertEqual(page["unverified"],[{"id":ROOM,"name":"测试群"}])
+        self.assertEqual(page["nextCursor"],"page2")
+        with st.database() as db: self.assertEqual(st.get(db,"group_routes")[ROOM]["mode"],"auto")
 
     def test_old_database_migrates_with_private_binding_and_history_intact(self):
         temp=self.enterContext(TemporaryDirectory())
