@@ -336,9 +336,13 @@ function applyState(s,force=false,discard=[]){
   const call=s.call||{};el("callStatus").textContent=(call.stage||"尚未测试")+" · 收到音频 "+((call.received||0)*.02).toFixed(1)+" 秒 · 发出音频 "+((call.sent||0)*.02).toFixed(1)+" 秒";
   if(Number.isFinite(call.latencyMs?.["到第一帧"]))el("callStatus").textContent+=" · 上一轮开口用时 "+(call.latencyMs["到第一帧"]/1000).toFixed(1)+" 秒";
   if(call.maxFeedGapMs>20)el("callStatus").textContent+=" · 本机播放供音最长中断 "+call.maxFeedGapMs+" 毫秒";
+  if(!call.active){
+    if(call.receiptAt||call.states?.length)el("callStatus").textContent="最近一通 · "+el("callStatus").textContent;
+    else if(s.settings.call_auto_answer)el("callStatus").textContent="";
+  }
   const autoAnswer=el("autoAnswerCall");
   if(!autoAnswer.disabled)autoAnswer.checked=Boolean(s.settings.call_auto_answer);
-  el("callStandby").textContent=s.settings.call_auto_answer?(s.call_listener?.message||"正在连接微信来电"):"";
+  el("callStandby").textContent=s.settings.call_auto_answer?(call.active&&call.receiptAt?"自动接听已开启":s.call_listener?.message||"正在连接微信来电"):"";
   el("dialCall").disabled=!s.logged||!s.paired||Boolean(call.active);
   el("answerCall").disabled=el("dialCall").disabled||autoAnswer.checked;
   el("stopCall").disabled=!call.active;
