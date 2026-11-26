@@ -188,6 +188,7 @@ class ChannelTest(unittest.TestCase):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.enterContext(patch.object(st,"ROOT",Path(temp.name)))
+        self.enterContext(patch.object(ds, "KEY", st.ROOT / "deepseek.key"))
         st.init()
         providers.initialize()
         self.messages = {}
