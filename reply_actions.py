@@ -7,6 +7,8 @@ CALL = "[[call]]"
 SILENT = "[[silent]]"
 VOICE_LABEL = "〔微信语音条〕"
 STICKER_LABEL = "〔微信表情包〕"
+# These look like media in a transcript. Only the exact action lines above execute.
+MEDIA_PREFIX = re.compile(r"^[\[［【〔]{1,2}\s*(?:(?:微信)?(?:语音(?:条|消息)?|表情(?:包)?|贴纸)|voice|sticker)\s*[\]］】〕]{1,2}",re.I)
 
 
 class MediaFormatError(ValueError):
@@ -34,10 +36,12 @@ def without_display_labels(text):
     changed = False
     for line, executable in message_lines(text):
         value = line.lstrip()
-        if executable and value.startswith((VOICE_LABEL, STICKER_LABEL)):
+        marker = MEDIA_PREFIX.match(value) if executable else None
+        if marker:
             changed = True
-            while value.startswith((VOICE_LABEL, STICKER_LABEL)):
-                value = value.split("〕", 1)[1].lstrip()
+            while marker:
+                value = value[marker.end():].lstrip()
+                marker = MEDIA_PREFIX.match(value)
             if not value:
                 continue
             line = value
@@ -80,10 +84,9 @@ def check_media_format(text, *, split=False):
     for bubble in text_bubbles(text) if split else (text,):
         for line, executable in message_lines(bubble):
             value = line.strip()
-            if not executable:
+            if not executable or value in (VOICE,STICKER,CALL,SILENT):
                 continue
-            if (value.startswith((VOICE_LABEL,STICKER_LABEL)) or
-                    (value.startswith((VOICE,STICKER,CALL,SILENT)) and value not in (VOICE,STICKER,CALL,SILENT))):
+            if MEDIA_PREFIX.match(value) or value.startswith((CALL,SILENT)):
                 raise MediaFormatError("媒体格式不正确，未发送这条回复")
 
 

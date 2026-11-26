@@ -236,11 +236,15 @@ class ChannelTest(unittest.TestCase):
         self.assertNotIn("[[sticker]]",messages[2]["content"])
         self.assertEqual(self.turns()[0]["answer"],old)
 
-        for quoted in ("`〔微信表情包〕` 这个是文字","“〔微信语音条〕” 是记录标签","看这个\n```\n〔微信表情包〕\n```"):
+        for quoted in ("`〔微信表情包〕` 这个是文字","“〔微信语音条〕” 是记录标签","看这个\n```\n〔微信表情包〕\n```","[微笑]","`[语音]` 是一个例子"):
             self.assertEqual(reply_actions.without_display_labels(quoted),(quoted,False))
             reply_actions.check_media_format(quoted,split=True)
         with self.assertRaises(reply_actions.MediaFormatError):
             reply_actions.check_media_format("这是一段足够长的回复来模拟分成两个气泡。〔微信表情包〕",split=True)
+        for label in ("[语音]","【微信表情】","[voice]"):
+            self.assertEqual(reply_actions.without_display_labels(label+" 早安"),("早安",True))
+            with self.assertRaises(reply_actions.MediaFormatError):
+                reply_actions.check_media_format(label+" 早安",split=True)
 
     def test_pending_parts_are_not_shown_as_sent_and_calls_only_replay_speech(self):
         self.bind()

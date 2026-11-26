@@ -239,7 +239,7 @@ VOICE_REQUEST_NOTE = "这轮请用语音回复。"
 VOICE_DENIAL_NOTE = "语音已就绪，用语音回刚才那句话。"
 CALL_RETRY_NOTE = "这轮没有回拨邀请，直接回消息。"
 MISSING_VOICE_NOTE = "这段会直接念给对方，只输出台词。"
-MEDIA_FORMAT_NOTE = "请按当前场景的格式重写。发媒体用单独的动作行，引用写法用行内代码。"
+MEDIA_FORMAT_NOTE = "重新按微信动作格式写。每条语音第一行单独写 [[voice]]，下一行是台词。表情单独一行 [[sticker]]。引用写法可用行内代码。"
 
 
 def voice_note(settings, note):
@@ -256,7 +256,7 @@ def chat_instructions(settings, *, group):
     lines = [scene + style]
     voice = providers.audio_route_ready(settings, "tts")
     if voice:
-        lines.append(f"每条语音写两行，多条就重复这两行。另发的文字另起行。\n{reply_actions.VOICE}\n要念的台词")
+        lines.append(f"每条语音用下面两行，发几条就写几组。台词只写一遍，单发语音时省去文字气泡。\n{reply_actions.VOICE}\n要念的台词")
     lines.append(f"想发表情包就单独写一行 {reply_actions.STICKER}，随后从本号的表情名中选一张。")
     if group:
         lines.append(f"想旁听时，只回 {reply_actions.SILENT}。")
