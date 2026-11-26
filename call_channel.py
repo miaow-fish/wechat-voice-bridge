@@ -76,7 +76,7 @@ def start(mode,*,expected_peer=None,turn_id=None):
     if tts["kind"]=="elevenlabs" and find_spec("aiohttp"):
         cfg["_call_eleven"]=tts
     cfg["_peer"]=peer
-    cfg["_call_history"]=st.recent_dialogue(peer,turn_id)
+    cfg["_call_history"]=st.recent_dialogue(peer,turn_id,for_call=True)
     if turn_id:
         with st.database() as db:
             row=db.execute("SELECT input FROM turns WHERE id=? AND peer=?",(turn_id,peer)).fetchone()

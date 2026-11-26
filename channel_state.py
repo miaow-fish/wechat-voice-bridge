@@ -105,7 +105,42 @@ def profile(db):
             values[field]=item["body"]
     return values
 
-def recent_dialogue(peer,before=None):
+def delivered_reply(db, turn, *, for_call):
+    """Render accepted actions for the model independently of the operator's transcript."""
+    import reply_actions as actions
+    if turn["status"] == "silent":
+        return "", ""
+    sent = db.execute("""SELECT id,kind,answer FROM turn_actions
+                         WHERE turn_id=? AND status='accepted' ORDER BY pos""",(turn["id"],)).fetchall()
+    if not sent and turn["status"] != "accepted":
+        return "", ""
+    words, receipts = [], []
+    for item in sent or [turn]:
+        kind, body = item["kind"], item["answer"] or ""
+        if kind == "sticker":
+            sticker = get(db, "sticker:"+item["id"], {}) or {}
+            name = " · ".join(str(sticker[k]) for k in ("group","label") if sticker.get(k))
+            if not name and body.startswith("〔") and body.endswith("〕") and " · " in body:
+                name = body[1:-1]
+            name = " ".join(name.split())[:120]
+            receipts.append("发出表情「"+name+"」" if name else "发出表情")
+            if not for_call:
+                words.append(actions.STICKER)
+        elif kind == "voice":
+            if not sent:
+                body = body.removeprefix(actions.VOICE_LABEL).strip()
+            if body:
+                words.append(body if for_call else actions.VOICE+"\n"+body.replace("\n"," "))
+        else:
+            plain, mislabeled = actions.without_display_labels(body)
+            if plain.strip():
+                words.append(plain)
+            if mislabeled and "媒体标注误发成了文字" not in receipts:
+                receipts.append("媒体标注误发成了文字")
+    return "\n".join(words), "、".join(receipts)
+
+
+def recent_dialogue(peer,before=None,*,for_call=False):
     """Keep each conversation's speakers, including group turns the assistant sat out."""
     import time
     with database() as db:
@@ -117,7 +152,8 @@ def recent_dialogue(peer,before=None):
             if row[0] is not None: until=row[0]
         rows=db.execute("""SELECT t.id,t.input,t.answer,t.kind,t.scope,t.status,MAX(i.stamp) AS stamp
             FROM turns t JOIN incoming i ON i.turn=t.id
-            WHERE t.peer=? AND (t.status='accepted' OR (t.scope='group' AND t.status='silent'))
+            WHERE t.peer=? AND (t.status='accepted' OR (t.scope='group' AND t.status='silent')
+                OR (t.status='failed' AND EXISTS (SELECT 1 FROM turn_actions a WHERE a.turn_id=t.id AND a.status='accepted')))
                 AND (? IS NULL OR t.rowid < (SELECT rowid FROM turns WHERE id=?))
             GROUP BY t.id ORDER BY t.rowid DESC LIMIT ?""",(peer,before,before,limit)).fetchall()
         turns=[]
@@ -140,14 +176,16 @@ def recent_dialogue(peer,before=None):
                     elif x["kind"]==3: messages.append("〔此前发送了图片〕")
                     else: messages.append(x["body"])
                 words="\n".join(messages)
-            reply=(row["answer"] or "") if row["status"]=="accepted" else ""
-            if row["kind"]=="voice" and not reply.startswith("〔微信语音条〕"): reply="〔微信语音条〕\n"+reply
-            turns.append((row["stamp"],words,reply))
+            reply,receipt=delivered_reply(db,row,for_call=for_call)
+            turns.append((row["stamp"],words,reply,receipt))
         for stamp,words,reply in db.execute("SELECT stamp,words,reply FROM call_lines WHERE peer=? AND stamp<=? ORDER BY stamp DESC,id DESC LIMIT ?",(peer,until,limit)):
-            turns.append((stamp,"〔微信电话〕\n"+words,reply))
+            turns.append((stamp,"〔微信电话〕\n"+words,reply,""))
     result=[]
-    for _,words,reply in sorted(turns,key=lambda t:t[0])[-limit:]:
-        result.append({"role":"user","content":words[:2000]})
+    for _,words,reply,receipt in sorted(turns,key=lambda t:t[0])[-limit:]:
+        message={"role":"user","content":words[:2000]}
+        if receipt:
+            message["wechat_receipt"]=receipt
+        result.append(message)
         if reply: result.append({"role":"assistant","content":reply[:2000]})
     return result
 

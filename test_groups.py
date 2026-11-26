@@ -127,6 +127,63 @@ class GroupTest(unittest.TestCase):
         dial.assert_not_called()
         self.assertEqual(self.sent,[{"threadId":ROOM,"text":reply}])
 
+    def test_group_repairs_display_labels_then_sends_two_voice_notes_and_real_sticker(self):
+        self.add("media","随便说两句，再选个表情")
+        plan="[[voice]]\n窗开了\n[[voice]]\n风进来了\n[[sticker]]"
+
+        def send_voice(*args):
+            self.sent.append({"threadId":ROOM,"kind":"voice"})
+            return {"id":str(len(self.sent))}
+
+        with (patch.object(providers,"chat",side_effect=["〔微信语音条〕窗开了\n〔微信表情包〕",plan]) as model,
+              patch.object(providers,"synthesize",return_value=b"fixture") as speech,
+              patch.object(worker,"cli",side_effect=send_voice),
+              patch.object(worker.account_stickers,"choose",return_value={"group":"花房","label":"铃兰"}),
+              patch.object(worker.account_stickers,"prepare",return_value={"kind":"prepared"})):
+            worker.process(self.turn("media"))
+        self.assertEqual([item["kind"] for item in self.sent],["voice","voice","sticker"])
+        self.assertEqual([call.args[1] for call in speech.call_args_list],["窗开了","风进来了"])
+        self.assertEqual(model.call_count,2)
+        self.assertIn(worker.MEDIA_FORMAT_NOTE,model.call_args.args[1][-1]["content"])
+        self.assertIn("花房 · 铃兰",self.turn("media")["answer"])
+
+        self.add("follow","刚才哪张")
+        with patch.object(providers,"chat",return_value="铃兰") as model:
+            worker.process(self.turn("follow"))
+        messages=model.call_args.args[1]
+        self.assertEqual(messages[2],{"role":"assistant","content":plan})
+        self.assertIn("发出表情「花房 · 铃兰」",messages[-1]["content"])
+        self.assertTrue(all(set(m)=={"role","content"} for m in messages))
+        self.assertNotIn("〔微信语音条〕",str(messages))
+        self.assertNotIn("〔微信表情包〕",str(messages))
+
+    def test_group_can_send_an_explicit_sticker_without_a_second_model_request(self):
+        self.add("named","发个叫铃兰的表情包")
+        owned=[{"group":"花房","label":"铃兰","item":"a","pack":"p"},
+               {"group":"花房","label":"满天星","item":"b","pack":"p"}]
+        with (patch.object(providers,"chat",return_value="[[sticker]]") as model,
+              patch.object(worker.account_stickers,"synchronize",return_value=owned),
+              patch.object(worker.account_stickers,"prepare",return_value={"kind":"prepared"})):
+            worker.process(self.turn("named"))
+            self.assertEqual(self.sent[0]["kind"],"sticker")
+            self.assertIn("花房 · 铃兰",self.turn("named")["answer"])
+            model.assert_called_once()
+            self.add("missing","发个叫铃的表情包")
+            with self.assertRaisesRegex(ValueError,"没有找到"):
+                worker.process(self.turn("missing"))
+            self.assertEqual(len(self.sent),1)
+            self.assertEqual(model.call_count,2)
+
+    def test_second_invalid_group_draft_is_not_sent_or_synthesized(self):
+        self.add("format","发一张吧")
+        with (patch.object(providers,"chat",side_effect=["普通文字\n〔微信表情包〕","[[voice]] 没有换行"]) as model,
+              patch.object(providers,"synthesize") as tts,
+              self.assertRaises(reply_actions.MediaFormatError)):
+            worker.process(self.turn("format"))
+        self.assertEqual(model.call_count,2)
+        tts.assert_not_called()
+        self.assertFalse(self.sent)
+
     def test_mentions_real_metadata_and_replays(self):
         group_chats.configure(ROOM,"mention")
         self.add("other","不读",peer=OTHER)

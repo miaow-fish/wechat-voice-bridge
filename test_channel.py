@@ -224,6 +224,35 @@ class ChannelTest(unittest.TestCase):
         self.assertNotIn("私有内容",context)
         self.assertEqual(tts.call_args.args[-1],"留一勺给我。")
 
+    def test_previous_literal_text_is_not_replayed_as_a_successful_media_action(self):
+        self.bind()
+        self.incoming("old","收到没有")
+        turn=self.turns()[0]["id"]
+        old="〔微信语音条〕看到了\n〔微信表情包〕"
+        worker.update(turn,status="accepted",kind="text",answer=old,receipt="fixture")
+        messages=worker.reply_messages(st.DEFAULT,"peer",None,[{"type":"text","text":"真的？"}],["微信文字"])
+        self.assertEqual(messages[2],{"role":"assistant","content":"看到了"})
+        self.assertIn("误发成了文字",messages[-1]["content"])
+        self.assertNotIn("[[sticker]]",messages[2]["content"])
+        self.assertEqual(self.turns()[0]["answer"],old)
+
+        for quoted in ("`〔微信表情包〕` 这个是文字","“〔微信语音条〕” 是记录标签","看这个\n```\n〔微信表情包〕\n```"):
+            self.assertEqual(reply_actions.without_display_labels(quoted),(quoted,False))
+            reply_actions.check_media_format(quoted,split=True)
+        with self.assertRaises(reply_actions.MediaFormatError):
+            reply_actions.check_media_format("这是一段足够长的回复来模拟分成两个气泡。〔微信表情包〕",split=True)
+
+    def test_pending_parts_are_not_shown_as_sent_and_calls_only_replay_speech(self):
+        self.bind()
+        self.incoming("old","开窗了吗")
+        turn=self.turns()[0]["id"]
+        worker.save_plan(turn,["开窗了吗"],[("voice","打开了"),("sticker",""),("text","晚些再说")],"")
+        with st.database() as db:
+            db.execute("UPDATE turns SET status='failed' WHERE id=?",(turn,))
+            db.execute("UPDATE turn_actions SET status='accepted',receipt='fixture' WHERE turn_id=? AND pos=0",(turn,))
+        self.assertEqual(st.recent_dialogue("peer")[-1]["content"],"[[voice]]\n打开了")
+        self.assertEqual(st.recent_dialogue("peer",for_call=True)[-1]["content"],"打开了")
+
     def test_punctuation_and_standalone_sticker_are_complete_replies(self):
         self.bind()
         self.incoming("odd","她把闹钟定在起床之后")
@@ -534,6 +563,25 @@ class ChannelTest(unittest.TestCase):
             self.assertEqual(account_stickers.choose("first",""),first)
             self.assertEqual(account_stickers.choose("next",""),new)
             self.assertEqual(sync.call_count,2)
+
+    def test_sticker_names_are_offered_only_when_selection_is_needed(self):
+        rows=[{"group":"花房","pack":"p","item":"one","label":"铃兰"},
+              {"group":"夜空","pack":"q","item":"two","label":"月亮"}]
+        cfg=st.DEFAULT|{"persona":"测试设定"}
+        with patch.object(account_stickers,"synchronize",return_value=rows), patch.object(providers,"chat",return_value="2") as choose:
+            base=worker.reply_messages(cfg,"peer",None,[{"type":"text","text":"你好"}],["微信文字"])
+            self.assertNotIn("铃兰",str(base))
+            self.assertNotIn("月亮",str(base))
+            self.assertEqual(account_stickers.choose("direct","铃兰",description_settings=cfg),rows[0])
+            choose.assert_not_called()
+            self.assertEqual(account_stickers.choose("intent","",description_settings=cfg),rows[1])
+            self.assertEqual(account_stickers.choose("intent","另一种",description_settings=cfg),rows[1])
+            choose.assert_called_once()
+            self.assertEqual(json.loads(choose.call_args.args[1][-1]["content"])["可选表情"],{"花房":[[1,"铃兰"]],"夜空":[[2,"月亮"]]})
+            choose.return_value="99"
+            with self.assertRaises(ValueError):
+                account_stickers.choose("bad","按语境选",description_settings=cfg)
+            with st.database() as db: self.assertIsNone(st.get(db,"sticker:bad"))
 
     def test_voice_origin_survives_current_input_history_and_retry(self):
         self.bind()

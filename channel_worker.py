@@ -239,6 +239,7 @@ VOICE_REQUEST_NOTE = "这轮请用语音回复。"
 VOICE_DENIAL_NOTE = "语音已就绪，用语音回刚才那句话。"
 CALL_RETRY_NOTE = "这轮没有回拨邀请，直接回消息。"
 MISSING_VOICE_NOTE = "这段会直接念给对方，只输出台词。"
+MEDIA_FORMAT_NOTE = "请按当前场景的格式重写。发媒体用单独的动作行，引用写法用行内代码。"
 
 
 def voice_note(settings, note):
@@ -255,8 +256,8 @@ def chat_instructions(settings, *, group):
     lines = [scene + style]
     voice = providers.audio_route_ready(settings, "tts")
     if voice:
-        lines.append(f"发语音按下面的行序写，混发时把两部分分开\n{reply_actions.VOICE}\n要念的台词\n另发的文字（可省）")
-    lines.append(f"发表情包时单独写一行 {reply_actions.STICKER}。")
+        lines.append(f"每条语音写两行，多条就重复这两行。另发的文字另起行。\n{reply_actions.VOICE}\n要念的台词")
+    lines.append(f"想发表情包就单独写一行 {reply_actions.STICKER}，随后从本号的表情名中选一张。")
     if group:
         lines.append(f"想旁听时，只回 {reply_actions.SILENT}。")
     elif voice and providers.audio_route_ready(settings, "asr"):
@@ -297,13 +298,29 @@ def allows_model_call(lines):
     return bool(re.search(r"打给我|打过来|回拨|给我.{0,8}(?:电话|打)|(?:打|来|通).{0,8}电话|来.{0,4}语音通话",words))
 
 
-def sticker_context(peer,ident,lines,assistant_text=""):
+def sticker_context(peer,ident,lines,assistant_text="",*,speakers=()):
     recent = history(peer,ident)[-4:]
     context = [("助手" if m["role"]=="assistant" else "对方")+"："+m["content"][-75:] for m in recent]
-    context.append("对方这轮："+"\n".join(lines[-3:])[-140:])
+    exchange = [f"{who}：{text}" if who else text for who,text in zip(speakers,lines)] if speakers else lines
+    context.append("对方这轮："+"\n".join(exchange[-3:])[-140:])
     if assistant_text:
         context.append("助手这轮的回复："+assistant_text[:140])
     return "\n".join(context)
+
+
+def explicit_sticker_for_action(db,turn):
+    # A single request can name the exact sticker after the assistant elects to send.
+    rows=db.execute("""SELECT COALESCE(v.transcript,i.body) FROM incoming i
+        LEFT JOIN voice_inputs v ON v.message_id=i.id WHERE i.turn=? LIMIT 2""",(turn,)).fetchall()
+    if len(rows)!=1:
+        return ""
+    details=account_stickers.request_details(rows[0][0].partition("\n〔引用〕")[0])
+    return details[0] if details and details[1] else ""
+
+
+def display_action(kind, value):
+    label = {"voice":reply_actions.VOICE_LABEL, "sticker":reply_actions.STICKER_LABEL, "text":""}[kind]
+    return label + value
 
 
 def save_plan(ident,lines,parts,hint):
@@ -315,8 +332,7 @@ def save_plan(ident,lines,parts,hint):
             spoken=spoken_reply.parse(value)
             value=spoken.words
             wire=json.dumps({"delivery":spoken.delivery},ensure_ascii=False)
-        label={"voice":"〔微信语音条〕","sticker":"〔微信表情包〕","text":""}[kind]
-        display.append(label+value)
+        display.append(display_action(kind,value))
         rows.append((ident+"-"+str(index),ident,index,kind,value,hint if kind=="sticker" else "",wire))
     with st.database() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -331,11 +347,15 @@ def deliver_plan(ident,peer,settings):
     with st.database() as db:
         records=db.execute("SELECT * FROM turn_actions WHERE turn_id=? ORDER BY pos",(ident,)).fetchall()
     for r in records:
+        if r["kind"]=="text" and r["status"]!="accepted" and not r["send_id"]:
+            reply_actions.check_media_format(r["answer"])
+    for r in records:
         if r["status"]!="accepted":
             deliver_action(r,peer,settings,requested=r["requested"],action=True,descriptive=True)
     with st.database() as db:
-        final=db.execute("SELECT receipt FROM turn_actions WHERE turn_id=? ORDER BY pos DESC LIMIT 1",(ident,)).fetchone()
-    update(ident,status="accepted",phase="receipt",error=None,receipt=final[0])
+        sent=db.execute("SELECT kind,answer,receipt FROM turn_actions WHERE turn_id=? ORDER BY pos",(ident,)).fetchall()
+    display = "\n".join(display_action(r["kind"],r["answer"]) for r in sent)
+    update(ident,status="accepted",phase="receipt",error=None,receipt=sent[-1]["receipt"],answer=display)
 
 
 class GroupTurnClosed(Exception):
@@ -387,10 +407,10 @@ def process(turn):
         if kind == "voice" and settings["tts"] == "off":
             raise ValueError("私聊配置已关闭语音合成")
         if kind == "sticker":
-            requested=next((details for line in reversed(lines) if (details:=account_stickers.request_details(line)) is not None),("",False))
+            requested=next((details for line in reversed(lines) if (details:=account_stickers.request_details(line.partition("\n〔引用〕")[0])) is not None),("",False))
             exact=requested[1]
             hint=literal or sticker_context(peer,ident,lines)
-            chosen = account_stickers.choose(ident,hint,description_settings=None if exact else settings)
+            chosen = account_stickers.choose(ident,hint,description_settings=settings,exact_name=bool(exact and literal))
             answer = "〔" + chosen["group"] + " · " + chosen["label"] + "〕"
         elif literal:
             answer = literal
@@ -402,7 +422,17 @@ def process(turn):
 
             def draft(note=None):
                 request = conversation_prompt.with_chat_note(messages, note) if note else messages
-                return providers.chat(settings, request, vision=vision)
+                result = providers.chat(settings, request, vision=vision)
+                split = settings.get("split_bubbles", True)
+                try:
+                    reply_actions.check_media_format(result, split=split)
+                except reply_actions.MediaFormatError:
+                    ensure_group_open(peer,ident)
+                    correction = (note+"\n" if note else "") + MEDIA_FORMAT_NOTE
+                    request = conversation_prompt.with_chat_note(messages, correction)
+                    result = providers.chat(settings, request, vision=vision)
+                    reply_actions.check_media_format(result, split=split)
+                return result
 
             answer = draft(voice_note(settings,VOICE_REQUEST_NOTE) if kind=="voice" else None)
             ensure_group_open(peer,ident)
@@ -447,7 +477,10 @@ def process(turn):
                     resolved.append((action,value))
                 if kind=="voice" and not any(a=="voice" for a,_ in resolved):
                     raise ValueError("本轮请求语音，生成内容缺少语音台词")
-                hint=sticker_context(peer,ident,lines," ".join(v for a,v in resolved if a!="sticker")) if any(a=="sticker" for a,_ in resolved) else ""
+                hint=""
+                if any(a=="sticker" for a,_ in resolved):
+                    spoken = " ".join(v for a,v in resolved if a!="sticker")
+                    hint = sticker_context(peer,ident,lines,spoken,speakers=[r["speaker"] for r in rows] if group else ())
                 save_plan(ident,lines,resolved,hint)
                 deliver_plan(ident,peer,settings)
                 return
@@ -475,17 +508,19 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
         save(phase="media")
         key = "reply-"+ident
         if kind == "sticker":
+            name=""
             if not chosen:
                 with st.database() as db:
                     chosen = st.get(db,"sticker:"+ident)
+                    if not chosen and descriptive:
+                        name=explicit_sticker_for_action(db,turn_id)
             existing = record["wire"] if chosen else None
             if not chosen:
-                chosen = account_stickers.choose(ident,requested,description_settings=settings if descriptive else None)
-                save(answer="〔"+chosen["group"]+" · "+chosen["label"]+"〕")
+                chosen = account_stickers.choose(ident,name or requested,description_settings=settings if descriptive else None,exact_name=bool(name))
             if existing:
                 account_stickers.ensure_owned(chosen)
             wire = json.loads(existing) if existing else account_stickers.prepare(chosen)
-            save(wire=json.dumps(wire),phase="send")
+            save(answer="〔"+chosen["group"]+" · "+chosen["label"]+"〕",wire=json.dumps(wire),phase="send")
             ensure_group_open(peer,turn_id)
             job = wx("/sends",{"threadId":peer,"kind":"sticker","source":wire},key)
         elif kind == "voice":
@@ -504,6 +539,7 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
             ensure_group_open(peer,turn_id)
             job = cli("messages","send",peer,"--voice",path,"--idempotency-key",key,"--detach")
         else:
+            reply_actions.check_media_format(answer)
             save(phase="send")
             ensure_group_open(peer,turn_id)
             job = wx("/sends",{"threadId":peer,"text":answer},key)
@@ -577,7 +613,7 @@ def deliver(scope="direct"):
                 with st.database() as db:
                     db.execute("""UPDATE turns SET status=?,attempts=?,error=?,next_try=?
                                WHERE id=? AND status='ready'""",
-                               ("failed" if attempts>=3 else "ready",attempts,explain(exc),
+                               ("failed" if attempts>=3 or isinstance(exc,reply_actions.MediaFormatError) else "ready",attempts,explain(exc),
                                 time.time()+5*attempts,row["id"]))
         except Exception as exc:
             print("delivery worker:",type(exc).__name__,flush=True)

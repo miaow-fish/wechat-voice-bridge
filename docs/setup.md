@@ -79,7 +79,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:28222/api/state
 
 ~~~sh
 git fetch origin --tags
-git switch --detach v0.2.5
+git switch --detach v0.2.6
 panel=/opt/wechat-vps-case/panel
 sudo tar -C "$panel" --exclude=deps --exclude=__pycache__ -czf "/root/wechat-panel-code-$(date +%Y%m%d-%H%M%S).tar.gz" .
 sudo systemctl stop wechat-vps-panel

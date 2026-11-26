@@ -29,7 +29,9 @@ def build(cfg, instructions, history, current, notes=(), *, now=None, private=Fa
         settings.append("私聊与电话专用指令\n" + cfg["private_context"])
     settings.append(instructions)
 
-    info = (["本轮背景设定\n" + topical] if topical else []) + list(notes)
+    receipts = [msg["wechat_receipt"] for msg in history if msg.get("wechat_receipt")]
+    info = (["此前微信投递（由早到晚）\n"+"\n".join(receipts)] if receipts else [])
+    info += (["本轮背景设定\n" + topical] if topical else []) + list(notes)
     suffix = [NOTE_HEADER + "\n".join(info)] if info else []
     when = datetime.now(BEIJING) if now is None else now.astimezone(BEIJING)
     weekday = "一二三四五六日"[when.weekday()]
@@ -38,7 +40,8 @@ def build(cfg, instructions, history, current, notes=(), *, now=None, private=Fa
         content = current + "".join(suffix)
     else:
         content = list(current) + [{"type": "text", "text": s} for s in suffix]
-    return [{"role": "system", "content": "\n\n".join(settings)}, *history,
+    dialogue = [{"role": msg["role"], "content": msg["content"]} for msg in history]
+    return [{"role": "system", "content": "\n\n".join(settings)}, *dialogue,
             {"role": "user", "content": content}]
 
 

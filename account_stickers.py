@@ -19,7 +19,7 @@ from wechat_case import cli, esc, HOST, HTTP, SCOPE, TOKEN, wx, media, image_typ
 PENDING = ("queued","running","pending")
 UNKNOWN = "〔收到表情包〕"
 DESCRIPTION_INSTRUCTIONS = "用一句中文描述画面里的主体、动作、表情和可读文字。"
-SELECTION_INSTRUCTIONS = "为助手选要发的表情。对方点名时按要求选，否则选贴合助手回应的那张。只回候选编号。"
+SELECTION_INSTRUCTIONS = "为助手挑一张表情。候选按整包名分组，每项是编号和表情名。有指定就按要求选，否则选贴合助手回应的。只回已有编号。"
 _recognizing = Lock()
 CAP = 64*1024*1024
 SEND = re.compile(r"^(?:(?:麻烦|请|你|可以|能不能|能|给我|帮我|再|也)\s*){0,8}(?:发给我|发|来|回)(?:一?[张个款只]|一下|下)?(?:微信)?(.{0,32}?)(?:表情包|表情贴纸|贴纸|贴图|表情)(?:给我)?(?:看看|试试)?[吧呀嘛吗呗啦呢哈啊～~！!。？?\s]*$")
@@ -193,9 +193,12 @@ def descriptive_choice(wanted,items,settings):
         finalists=[descriptive_choice(wanted,items[i:i+200],settings) for i in range(0,len(items),200)]
         return descriptive_choice(wanted,finalists,settings)
     options=items
-    data={"请求或对话":wanted,"可选表情":[[n,row["group"],row["label"]] for n,row in enumerate(options,1)]}
+    packs={}
+    for number,row in enumerate(options,1):
+        packs.setdefault(row["group"],[]).append([number,row["label"]])
+    data={"可选表情":packs,"本轮":wanted}
     context=[{"role":"system","content":SELECTION_INSTRUCTIONS},
-             {"role":"user","content":json.dumps(data,ensure_ascii=False)}]
+             {"role":"user","content":json.dumps(data,ensure_ascii=False,separators=(",",":"))}]
     reply=providers.chat(settings,context)
     if not re.fullmatch(r"[1-9][0-9]{0,2}",reply.strip()):
         raise ValueError("表情选择服务未返回有效编号")
@@ -205,7 +208,7 @@ def descriptive_choice(wanted,items,settings):
     return options[n-1]
 
 
-def choose(ident,wanted,*,description_settings=None):
+def choose(ident,wanted,*,description_settings=None,exact_name=False):
     with st.database() as db:
         previous=st.get(db,"sticker:"+ident)
         last=st.get(db,"last_owned_sticker")
@@ -216,20 +219,28 @@ def choose(ident,wanted,*,description_settings=None):
         needle=wanted.casefold().strip()
         if not needle:
             return [r for r in items if r["pack"]] or items
-        exact=[r for r in items if r["label"].casefold()==needle]
-        return exact or [r for r in items if needle in (r["group"]+" "+r["label"]).casefold()]
+        named=[r for r in items if r["label"].casefold()==needle]
+        if named or exact_name:
+            return named
+        return [r for r in items if needle in (r["group"]+" "+r["label"]).casefold()]
     options=matching(rows)
     summary(rows)
-    if not options and rows and wanted and description_settings is not None:
-        available=[r for r in rows if r["item"]!=last] or rows
-        options=[descriptive_choice(wanted,available,description_settings)]
+    if not options and description_settings is not None and not exact_name:
+        options=rows
     if not options:
         if wanted:
             raise ValueError("当前微信账号的表情库中没有找到「"+wanted[:32]+"」")
         raise ValueError("当前微信账号还没有收藏或添加可发送的表情")
     candidates=[r for r in options if r["item"]!=last] or options
-    picked=secrets.choice(candidates)
+    if len(candidates)>1 and description_settings is not None:
+        picked=descriptive_choice(wanted,candidates,description_settings)
+    else:
+        picked=secrets.choice(candidates)
     with st.database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        previous=st.get(db,"sticker:"+ident)
+        if previous:
+            return previous
         st.put(db,"sticker:"+ident,picked)
     return picked
 
