@@ -1,4 +1,4 @@
-"""Read new direct messages and deliver replies only to the operator's paired chat."""
+"""Route live messages to the paired friend and explicitly enabled WeChat groups."""
 from datetime import datetime
 import hashlib
 import hmac
@@ -13,6 +13,7 @@ import call_channel
 import channel_state as st
 import conversation_prompt
 import deepseek_case as ds
+import group_chats
 import pcm_audio
 import providers
 import reply_actions
@@ -62,15 +63,25 @@ def ingest(db, event):
         return
     peer, mid = data.get("threadId"), data.get("messageId")
     bound = st.get(db,"peer")
-    if not peer or not mid or (bound and bound != peer):
+    if not isinstance(peer,str) or not peer or not mid:
         return
-    if data.get("direction") == "outgoing" and bound == peer and data.get("origin") in ("local_send","live"):
+    group = st.get(db,"group_routes",{}).get(peer) if peer.endswith("@chatroom") else None
+    if not group and (peer.endswith("@chatroom") or (bound and bound != peer)):
+        return
+    if data.get("direction") == "outgoing" and (bound == peer or group) and data.get("origin") in ("local_send","live"):
         db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE peer=? AND status='collecting'",(peer,))
         return
     if data.get("direction") != "incoming" or data.get("origin") != "live":
         return
     pair = st.get(db,"pair",{})
-    if not bound and pair.get("expires",0) < time.time():
+    if not group and not bound and pair.get("expires",0) < time.time():
+        return
+    try:
+        stamp = datetime.fromisoformat(event["createdAt"]).timestamp()
+    except (KeyError,TypeError,ValueError):
+        if group: return
+        stamp = time.time()
+    if group and stamp < group["since"]:
         return
     if db.execute("SELECT 1 FROM incoming WHERE id=?",(mid,)).fetchone():
         return
@@ -80,12 +91,14 @@ def ingest(db, event):
         if err.code == 404:
             return
         raise
-    if (msg.get("direction") != "incoming" or msg.get("id") != mid or msg.get("threadId") != peer
-            or msg.get("senderId") != peer or msg.get("recall")):
+    sender = msg.get("senderId")
+    if (msg.get("direction") != "incoming" or msg.get("id") != mid or msg.get("threadId") != peer or msg.get("recall")
+            or not isinstance(sender,str) or not sender
+            or (group and sender == peer) or (not group and sender != peer)):
         return
     kind = msg.get("type")
     body = (msg.get("body") if isinstance(msg.get("body"),str) else "").strip()
-    if not bound:
+    if not group and not bound:
         if kind == 1 and valid_pair(pair,body) and wx("/threads/"+esc(peer)).get("kind") == "direct":
             db.execute("BEGIN IMMEDIATE")
             if not st.get(db,"peer") and valid_pair(st.get(db,"pair",{}),body):
@@ -107,11 +120,14 @@ def ingest(db, event):
         return
     if kind in (3,34):
         body = ""
-    try:
-        stamp = datetime.fromisoformat(event["createdAt"]).timestamp()
-    except (KeyError,TypeError,ValueError):
-        stamp = time.time()
+    speaker = group_chats.speaker_name(peer,sender) if group else None
+    mentions = msg.get("mentions") or {}
+    mentioned = bool(group and mentions.get("state")=="known" and mentions.get("self") is True)
     db.execute("BEGIN IMMEDIATE")
+    if group and st.get(db,"group_routes",{}).get(peer) != group:
+        return
+    if db.execute("SELECT 1 FROM incoming WHERE id=?",(mid,)).fetchone():
+        return
     wait_seconds = st.merge_window(st.get(db, "profile", {}))
     active = db.execute("SELECT id,next_try FROM turns WHERE status='collecting' AND peer=? ORDER BY rowid DESC LIMIT 1",(peer,)).fetchone()
     if wait_seconds and active and stamp <= active["next_try"]:
@@ -123,8 +139,12 @@ def ingest(db, event):
         turn = hashlib.sha256((peer+"\n"+mid).encode()).hexdigest()
         status = "collecting" if wait_seconds else "ready"
         deadline = stamp + wait_seconds if wait_seconds else 0
-        db.execute("INSERT INTO turns(id,peer,status,next_try) VALUES(?,?,?,?)", (turn, peer, status, deadline))
-    db.execute("INSERT INTO incoming VALUES(?,?,?,?,?,?)",(mid,peer,kind,body[:16000],stamp,turn))
+        db.execute("INSERT INTO turns(id,peer,status,next_try,scope) VALUES(?,?,?,?,?)",
+                   (turn, peer, status, deadline, "group" if group else "direct"))
+    db.execute("INSERT INTO incoming(id,peer,kind,body,stamp,turn) VALUES(?,?,?,?,?,?)",
+               (mid,peer,kind,body[:16000],stamp,turn))
+    if group:
+        db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned) VALUES(?,?,?)",(mid,speaker,mentioned))
 
 
 def collect():
@@ -161,6 +181,9 @@ def input_parts(rows, settings):
     pixels = 0
     for row in rows:
         body = row["body"]
+        speaker = st.speaker_line(row)
+        if speaker:
+            parts.append({"type":"text","text":speaker})
         if row["kind"] == 3:
             data = media(row["id"],("original","standard","normal"))
             pixels += len(data)
@@ -212,15 +235,19 @@ def history(peer,current):
     return st.recent_dialogue(peer,current)
 
 
-def reply_messages(settings,peer,current,kind,parts,sources,*,now=None):
-    system="你在微信私聊中直接回复对方。可以简短，按当前消息的语境回答。"
+def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=None):
+    system=("你正在参加微信群聊。结合发言者和群内上下文，决定此刻是否接话。" if group else
+            "你在微信私聊中直接回复对方。可以简短，按当前消息的语境回答。")
     voice_on=bool(settings["tts"]!="off" and settings.get("voice"))
     call_on=voice_on and settings["asr"]!="off"
     system+="\n当前微信功能：表情包由通道从这个微信号的已下载表情中选择并发送。"
     system+=("语音条可用，助手自己决定说什么，系统用已配置的音色发送。" if voice_on else "语音条暂未启用。")
-    system+=("一对一微信电话可用，收到当前联系人的明确回拨请求会实际拨号。" if call_on else "一对一微信电话暂未配置完整。")
+    if not group:
+        system+=("一对一微信电话可用，收到当前联系人的明确回拨请求会实际拨号。" if call_on else "一对一微信电话暂未配置完整。")
     system+="有关功能以当前状态为准。历史回答只是当时说过的话。"
-    system+="\n"+reply_actions.RULES
+    system+="\n"+(reply_actions.GROUP_RULES if group else reply_actions.RULES)
+    if settings.get("split_bubbles",True):
+        system+="\n日常微信可以只回一个短句。想另发一条时换行。"
     if settings["asr"]!="off":
         system+="\n收到微信语音时，按转写内容回应，语气标注只供理解本句。"
     if voice_on:
@@ -228,11 +255,13 @@ def reply_messages(settings,peer,current,kind,parts,sources,*,now=None):
                      else "用语音条时，台词写成可以直接朗读的话。")
     recent=history(peer,current)
     notes=[]
+    if group:
+        notes.append("当前群聊："+group["name"])
     if any(s!="微信文字" for s in sources):
         notes.append("来源（依次）："+"、".join(sources))
     if kind=="voice":
         notes.append("对方这轮想听语音，按语音代号回复。")
-    return conversation_prompt.build(settings,system,recent,parts,notes,now=now)
+    return conversation_prompt.build(settings,system,recent,parts,notes,now=now,private=not group)
 
 
 def dispatch_call(ident,peer,lines):
@@ -278,8 +307,9 @@ def save_plan(ident,lines,parts,hint):
         db.execute("BEGIN IMMEDIATE")
         if db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone(): return
         db.executemany("INSERT INTO turn_actions(id,turn_id,pos,kind,answer,requested,wire) VALUES(?,?,?,?,?,?,?)",rows)
+        kinds={kind for kind,_ in parts}
         db.execute("UPDATE turns SET input=?,answer=?,kind=?,phase='media' WHERE id=?",
-                   ("\n".join(lines),"\n".join(display),parts[0][0] if len(parts)==1 else "mixed",ident))
+                   ("\n".join(lines),"\n".join(display),parts[0][0] if len(kinds)==1 else "mixed",ident))
 
 
 def deliver_plan(ident,peer,settings):
@@ -293,13 +323,33 @@ def deliver_plan(ident,peer,settings):
     update(ident,status="accepted",phase="receipt",error=None,receipt=final[0])
 
 
+class GroupTurnClosed(Exception):
+    """Group settings changed while this response was being prepared."""
+
+
+def ensure_group_open(peer, ident):
+    if peer.endswith("@chatroom"):
+        with st.database() as db:
+            pending = db.execute("""SELECT 1 FROM turns WHERE id=? AND peer=? AND scope='group'
+                                    AND status IN ('collecting','sealed','ready')""", (ident,peer)).fetchone()
+            if not pending or peer not in st.get(db,"group_routes",{}):
+                raise GroupTurnClosed()
+
+
 def process(turn):
     ident, peer = turn["id"], turn["peer"]
     with st.database() as db:
-        if peer != st.get(db,"peer"):
+        group = None
+        if turn["scope"]=="group":
+            ensure_group_open(peer,ident)
+            group = st.get(db,"group_routes",{}).get(peer)
+            if not group: raise GroupTurnClosed()
+        elif peer != st.get(db,"peer"):
             raise ValueError("私聊绑定已改变")
         settings = st.profile(db)
-        rows = db.execute("SELECT * FROM incoming WHERE turn=? ORDER BY rowid",(ident,)).fetchall()
+        rows = db.execute("""SELECT i.*,g.speaker,g.mentioned FROM incoming i
+                             LEFT JOIN group_inputs g ON g.message_id=i.id WHERE i.turn=? ORDER BY i.rowid""",
+                          (ident,)).fetchall()
         planned=db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone()
     if planned:
         deliver_plan(ident,peer,settings)
@@ -308,9 +358,14 @@ def process(turn):
     voice_wire = turn["wire"] if kind == "voice" else None
     chosen = None
     if not answer:
+        if group and group["mode"]=="mention" and not any(r["mentioned"] for r in rows):
+            update(ident,status="silent",phase="group_mention",error=None)
+            return
         update(ident,phase="read")
         parts, lines, sources = input_parts(rows,settings)
-        kind, literal = mode_for(lines)
+        # In a group “send a voice note” may have been addressed to another member.
+        # Only the assistant's own decision can trigger a group send.
+        kind, literal = ("text", "") if group else mode_for(lines)
         if kind=="call":
             dispatch_call(ident,peer,lines)
             return
@@ -327,8 +382,13 @@ def process(turn):
         else:
             update(ident,phase="model")
             vision = any(p["type"] == "image_url" for p in parts)
-            messages=reply_messages(settings,peer,ident,kind,parts,sources)
+            ensure_group_open(peer,ident)
+            messages=reply_messages(settings,peer,ident,kind,parts,sources,group=group)
             answer = providers.chat(settings,messages,vision=vision)
+            ensure_group_open(peer,ident)
+            if group and (reply_actions.SILENT in answer or reply_actions.CALL in answer):
+                update(ident,status="silent",phase="group_decision",error=None)
+                return
             if kind=="voice" and VOICE_DENIAL.search(answer):
                 messages=conversation_prompt.with_chat_note(messages,"语音条已准备好发送。请直接和对方聊一句，自选内容，无需解释功能。")
                 answer=providers.chat(settings,messages,vision=vision)
@@ -344,6 +404,19 @@ def process(turn):
                 plan=reply_actions.parse(answer)
                 if plan and plan[0][0]=="call":
                     raise ValueError("这轮没有明确的回拨请求")
+            if settings.get("split_bubbles",True):
+                if plan:
+                    expanded=[]
+                    for action,value in plan:
+                        if action=="text":
+                            expanded.extend(("text",b) for b in reply_actions.text_bubbles(value))
+                        else:
+                            expanded.append((action,value))
+                    plan=expanded
+                elif kind=="text":
+                    bubbles=reply_actions.text_bubbles(answer)
+                    if len(bubbles)>1:
+                        plan=[("text",b) for b in bubbles]
             if plan:
                 resolved=[]
                 for action,value in plan:
@@ -352,7 +425,7 @@ def process(turn):
                     if action=="voice" and not value:
                         writing=conversation_prompt.with_chat_note(messages,"你已选择用语音回复。根据同一段对话写下想说的话。这次只输出台词。")
                         value=providers.chat(settings,writing,vision=vision)
-                        if reply_actions.parse(value) or VOICE_DENIAL.search(value):
+                        if reply_actions.SILENT in value or reply_actions.parse(value) or VOICE_DENIAL.search(value):
                             raise ValueError("语音台词仍未生成")
                     resolved.append((action,value))
                 if kind=="voice" and not any(a=="voice" for a,_ in resolved):
@@ -380,6 +453,8 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
     def save(**values):
         update(ident,action=action,**values)
     if not job_id:
+        turn_id=record["turn_id"] if action else ident
+        ensure_group_open(peer,turn_id)
         save(phase="media")
         key = "reply-"+ident
         if kind == "sticker":
@@ -394,6 +469,7 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
                 account_stickers.ensure_owned(chosen)
             wire = json.loads(existing) if existing else account_stickers.prepare(chosen)
             save(wire=json.dumps(wire),phase="send")
+            ensure_group_open(peer,turn_id)
             job = wx("/sends",{"threadId":peer,"kind":"sticker","source":wire},key)
         elif kind == "voice":
             path = st.ROOT/(ident+".wav")
@@ -408,9 +484,11 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
                 # Validate it without changing the source of an idempotent send.
                 pcm_audio.samples(path.read_bytes())
             save(phase="send")
+            ensure_group_open(peer,turn_id)
             job = cli("messages","send",peer,"--voice",path,"--idempotency-key",key,"--detach")
         else:
             save(phase="send")
+            ensure_group_open(peer,turn_id)
             job = wx("/sends",{"threadId":peer,"text":answer},key)
         job_id = job["id"]
         save(send_id=job_id)
@@ -419,7 +497,7 @@ def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,
         receipt = wx("/sends/"+esc(job_id))
         detail = receipt.get("result") or {}
         if (receipt.get("destination") or receipt.get("threadId")) != peer:
-            raise ValueError("微信回执的目标私聊不匹配")
+            raise ValueError("微信回执的目标会话不匹配")
         sent = receipt.get("state")
         if sent == "accepted" or (kind=="sticker" and sent=="available" and detail.get("serverAcceptance")=="accepted"):
             server = receipt.get("serverId") or receipt.get("serverMessageId") or detail.get("serverMessageId")
@@ -454,25 +532,36 @@ def explain(exc):
     return "操作失败（"+type(exc).__name__+"）"
 
 
-def deliver():
+def next_turn(db,scope):
+    return db.execute("""SELECT t.* FROM turns t WHERE t.scope=? AND t.next_try<=?
+        AND t.status IN ('collecting','sealed','ready')
+        AND NOT EXISTS (SELECT 1 FROM turns earlier WHERE earlier.peer=t.peer AND earlier.rowid<t.rowid
+                        AND earlier.status IN ('collecting','sealed','ready'))
+        ORDER BY t.rowid LIMIT 1""",(scope,time.time())).fetchone()
+
+
+def deliver(scope="direct"):
     while True:
         try:
             with st.database() as db:
                 db.execute("BEGIN IMMEDIATE")
-                row = db.execute("SELECT * FROM turns WHERE status IN ('collecting','sealed','ready') ORDER BY rowid LIMIT 1").fetchone()
-                if row and row["next_try"] <= time.time():
+                row = next_turn(db,scope)
+                if row:
                     db.execute("UPDATE turns SET status='ready' WHERE id=?",(row["id"],))
-                else:
-                    row = None
             if not row:
                 time.sleep(.4)
                 continue
             try:
                 process(row)
+            except GroupTurnClosed:
+                continue
             except Exception as exc:
                 attempts = row["attempts"] + 1
-                update(row["id"],status="failed" if attempts >= 3 else "ready",attempts=attempts,
-                       error=explain(exc),next_try=time.time()+5*attempts)
+                with st.database() as db:
+                    db.execute("""UPDATE turns SET status=?,attempts=?,error=?,next_try=?
+                               WHERE id=? AND status='ready'""",
+                               ("failed" if attempts>=3 else "ready",attempts,explain(exc),
+                                time.time()+5*attempts,row["id"]))
         except Exception as exc:
             print("delivery worker:",type(exc).__name__,flush=True)
             time.sleep(3)

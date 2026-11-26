@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>微信助手 · 私聊工作台</title><link rel="stylesheet" href="/panel.css"><script defer src="/panel.js"></script></head>
+<title>微信助手 · 聊天工作台</title><link rel="stylesheet" href="/panel.css"><script defer src="/panel.js"></script></head>
 <body><div class="shell">
-<aside class="rail"><div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><strong>微信助手</strong><small>私聊工作台</small></div></div>
+<aside class="rail"><div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><strong>微信助手</strong><small>聊天工作台</small></div></div>
 <button type="button" id="menuButton" class="secondary" aria-controls="sections" aria-expanded="false">菜单</button>
 <nav id="sections" aria-label="工作台"><a href="#connect"><i aria-hidden="true">◉</i>微信连接</a><a href="#routes"><i aria-hidden="true">≋</i>模型与声音</a><a href="#providers"><i aria-hidden="true">⌘</i>服务商</a><a href="#profiles"><i aria-hidden="true">▤</i>人设与世界书</a><a href="#memory"><i aria-hidden="true">◎</i>外接记忆</a><a href="#stickers"><i aria-hidden="true">☺</i>微信表情</a><a href="#activity"><i aria-hidden="true">↗</i>通话与记录</a></nav>
 <div class="status" id="summary" role="status">连接中…</div></aside>
-<main><header class="page-head"><h1 id="pageTitle">微信连接</h1><p id="pageDesc">管理助手的微信登录和私聊配对。</p></header>
+<main><header class="page-head"><h1 id="pageTitle">微信连接</h1><p id="pageDesc">登录助手微信，选择好友和群聊。</p></header>
 <form id="settings" novalidate>
 <section id="connect" class="view">
 <div class="card"><div class="row"><div><h2>助手账号</h2><p id="wxstate">读取登录状态…</p></div><button type="button" id="login">显示登录二维码</button></div>
@@ -14,7 +14,12 @@
 <div class="row"><div><h2>绑定私聊</h2><p id="pairstate">等待读取</p></div><button class="secondary" type="button" id="pair" disabled>生成配对口令</button></div>
 <div id="pairbox" hidden><p>用日常微信把这句私发给助手号。口令十分钟内有效。</p><output id="paircode"></output></div></div>
 <div class="card">
-  <h2>私聊回复</h2>
+  <div class="row"><h2>群聊</h2><button type="button" class="secondary" id="readGroups">选择微信群</button></div>
+  <p>选「由助手决定」会把这个群的新消息交给已配置的模型。它可以接话，也可以静静旁听。</p>
+  <div id="groupList" class="group-list"></div><p id="groupState" role="status"></p>
+</div>
+<div class="card">
+  <h2>消息合并</h2>
   <div class="row space">
     <label for="mergeMessages">合并连续消息</label>
     <input class="switch" id="mergeMessages" name="merge_messages" type="checkbox" role="switch" aria-describedby="mergeHelp" checked>
@@ -22,11 +27,20 @@
   <p id="mergeHelp">每收到一条就重新计时，等你发完再一起回复。</p>
   <label class="space" for="mergeSeconds">等待时长（秒）</label>
   <input id="mergeSeconds" name="merge_wait_seconds" type="number" inputmode="numeric" min="1" step="1" value="7" required>
+  <div class="row space"><label for="splitBubbles">回复分成微信气泡</label>
+    <input class="switch" id="splitBubbles" name="split_bubbles" type="checkbox" role="switch" checked></div>
+  <p>换行分别发送，较长的一段也会按句分开。语音条保留完整台词。</p>
   <div class="savebar"><button type="submit">保存回复设置</button></div>
 </div></section>
 <section id="providers" class="view" hidden><div class="toolbar"><button type="button" id="addService">＋ 添加服务商</button></div><div id="services" class="service-list"></div></section>
 <section id="routes" class="view" hidden><div class="route-layout card"><div id="roleMenu" class="role-menu" aria-label="模型用途"></div><div id="moduleRows"></div></div><div class="savebar"><button>保存模型设置</button></div></section>
-<section id="profiles" class="view" hidden><div class="card"><label>私聊配置名称<input name="name" required maxlength="80"></label></div>
+<section id="profiles" class="view" hidden><div class="card"><label>聊天配置名称<input name="name" required maxlength="80"></label></div>
+<div class="card"><h2>注入模型的上下文</h2>
+  <label class="space">共同固定上下文<textarea name="pinned_context" maxlength="16000" rows="4" placeholder="每次私聊、群聊和通话都带上的设定"></textarea></label>
+  <label class="space">仅好友私聊和电话<textarea name="private_context" maxlength="16000" rows="3" placeholder="只希望助手和你单独聊天时记住的内容"></textarea></label>
+  <label class="space">最近对话轮数<input name="history_turns" type="number" min="0" max="100" step="1" required value="30"></label>
+  <p>0 到 100 轮。设为 0 仍会带上固定内容、本轮新消息和当前时间。</p>
+</div>
 <div id="assets" class="assets"></div><div class="savebar"><button>保存资料选择</button></div></section>
 <section id="memory" class="view" hidden><div class="card"><div class="section-head"><h2>外部记忆服务</h2><span class="pill" id="memoryState"></span></div>
 <p>登记独立部署的记忆服务地址。当前微信通道尚未接入记忆读写接口。</p>

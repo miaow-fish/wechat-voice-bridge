@@ -28,4 +28,4 @@ jobs:
       - name: Run the channel and call regression tests
         env:
           PYTHONPATH: /opt/wechat-vps-case/panel/deps
-        run: /usr/bin/python3 -B -m unittest -v test_channel test_calls
+        run: /usr/bin/python3 -B -m unittest discover -v

@@ -10,7 +10,7 @@ CLOCK_HEADER = "\n\n〔当前北京时间〕"
 NOTE_HEADER = "\n\n〔通道附注〕\n"
 
 
-def build(cfg, instructions, history, current, notes=(), *, now=None):
+def build(cfg, instructions, history, current, notes=(), *, now=None, private=False):
     words = current if isinstance(current, str) else "\n".join(
         part["text"] for part in current if part["type"] == "text"
     )
@@ -23,6 +23,10 @@ def build(cfg, instructions, history, current, notes=(), *, now=None):
         settings.append("人设\n" + cfg["persona"])
     if fixed:
         settings.append("常驻背景\n" + fixed)
+    if cfg.get("pinned_context"):
+        settings.append("固定上下文\n" + cfg["pinned_context"])
+    if private and cfg.get("private_context"):
+        settings.append("私聊固定上下文\n" + cfg["private_context"])
     settings.append("文末时间和通道附注由系统提供。")
     settings.append(instructions)
 

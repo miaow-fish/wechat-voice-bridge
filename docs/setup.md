@@ -15,15 +15,17 @@
 
 每个功能可以选不同服务商。新建兼容服务时填 API 根地址，并在对应模块选择模型。识图、听写和合成是否可用取决于服务商及所选模型。DeepSeek 的聊天模型和同平台单独的音频工具分开调用。[DeepSeek 服务说明](https://api-docs.deepseek.com/)
 
-## 私聊怎样等你说完
+## 私聊和群聊怎样等你说完
 
-打开「微信连接 → 私聊回复」，调整「合并连续消息」和「等待时长」，再点「保存回复设置」。例如设成 10 秒，在第 8 秒又发来一条语音，就从这条语音重新等 10 秒。文字、图片、语音条和表情可以进同一轮。
+打开「微信连接 → 消息合并」，调整「合并连续消息」和「等待时长」，再点「保存回复设置」。例如设成 10 秒，在第 8 秒同一会话又来一条语音，就从这条语音重新等 10 秒。文字、图片、语音条和表情可以进同一轮。
+
+在「微信连接 → 群聊」里选助手号已经加入的群。「由助手决定」把新消息交给模型判断是否参与。助手选择旁听时，其他群成员看不到回复气泡。「仅 @助手 时参与」识别微信自带的点名，群成员手打昵称或 @所有人 都不会单独触发。每个群分别计时、记录发言者和近期对话。
 
 关闭合并会把已收齐的消息先作为一轮处理，之后每条各回一轮。再次开启时沿用上次保存的秒数。
 
 ## 人设、世界书和上下文
 
-在「人设与世界书」里填人设，或导入 TXT、Markdown、DOCX、酒馆世界书 JSON，再预览并选用。关键词条目由当轮文字激活，常驻条目随每轮使用。文字聊天和通话使用同一份人设与世界书。当前会带入最近八轮已送达的私聊或电话对话。
+在「人设与世界书」里填人设，或导入 TXT、Markdown、DOCX、酒馆世界书 JSON，再预览并选用。关键词条目由当轮文字激活，常驻条目随每轮使用。同页的「注入模型的上下文」提供共同固定内容、仅好友私聊和电话使用的补充，以及近期对话轮数。默认 30 轮。固定内容先进入系统消息，然后是本会话的历史，再是当前发言和北京时间。群里的旁听轮可以接到后续群聊中。
 
 「外接记忆」只登记地址，本版尚未执行外部记忆读写。陌生表情首次识图可以单独开启，已认出的同一张图会使用缓存。表情素材来自各自微信号已添加的表情包与收藏。
 
@@ -66,6 +68,21 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:28222/api/state
 **扫码成功但没有回复。** 打开「微信连接」核对「微信在线」和「已绑定私聊」。如果开了「合并连续消息」，从最后一条算起等到你设的秒数，再看「通话与记录」里这一轮的状态。
 
 **安装提示已有目录或端口被占用。** 首次安装脚本用于新实例，遇到原有目录会退出。已有部署可用 `systemctl status` 查看服务。启动报错时可在本机查日志。
+
+### 从 v0.1.0 更新工作台
+
+在之前克隆的仓库里运行以下命令。选一个没有通话和待发回复的时段。这个版本沿用已有的微信登录、绑定和服务商设置，工作台首次启动时自动升级聊天数据库。
+
+~~~sh
+git fetch origin --tags
+git switch --detach v0.2.0
+panel=/opt/wechat-vps-case/panel
+sudo tar -C "$panel" --exclude=deps --exclude=__pycache__ -czf "/root/wechat-panel-code-$(date +%Y%m%d-%H%M%S).tar.gz" .
+sudo systemctl stop wechat-vps-panel
+sudo install -m 0644 call_channel.py channel_state.py channel_worker.py conversation_prompt.py group_chats.py panel.py reply_actions.py index.html panel.js panel.css "$panel/"
+sudo systemctl start wechat-vps-panel
+sudo systemctl is-active wechat-vps-panel wechat-vps-case
+~~~
 
 ~~~sh
 sudo journalctl -u wechat-vps-case -u wechat-vps-panel -n 40 --no-pager

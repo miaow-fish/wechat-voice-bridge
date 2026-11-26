@@ -8,7 +8,7 @@ import secrets
 from threading import Lock, Thread
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import channel_state as st
 import deepseek_case as ds
@@ -16,6 +16,7 @@ import providers
 import sensevoice_local
 import account_stickers
 import call_channel
+import group_chats
 import worldbooks
 from wechat_case import esc, wx
 
@@ -110,7 +111,7 @@ def save_asset(data):
             profile=st.get(db,"profile",{})
             profile.update({kind+"_id":ident, "memory_url" if kind=="memory" else kind:item["body"]})
             st.put(db,"profile",profile)
-    return {"id":ident,"message":"已保存，可以在私聊配置中选用"}
+    return {"id":ident,"message":"资料已保存，可在聊天设置中选用"}
 
 
 def save_profile(data):
@@ -120,6 +121,10 @@ def save_profile(data):
         db.execute("BEGIN IMMEDIATE")
         previous = st.profile(db)
         cfg = {**previous, **data}
+        if not 0 <= cfg["history_turns"] <= st.MAX_HISTORY_TURNS:
+            raise ValueError("最近对话轮数须在 0 到 %d 之间"%st.MAX_HISTORY_TURNS)
+        if max(len(cfg["pinned_context"]),len(cfg["private_context"]))>16000:
+            raise ValueError("每段固定上下文最多 16,000 字符")
         if not 0 < cfg["merge_wait_seconds"] < 2**53:
             raise ValueError("等待时长须为有效的正整数秒")
         library=st.get(db,"library",{})
@@ -168,6 +173,7 @@ def state():
         return {"logged": bool(acct.get("authenticated")), "paired": bool(st.get(db, "peer")),
                 "paircode":pair.get("code") if acct.get("authenticated") and not st.get(db,"peer") and pair.get("expires",0)>time.time() else None,
                 "key": public_key(db), "models":st.get(db, "models", []), "settings":st.profile(db),
+                "group_routes":st.get(db,"group_routes",{}),
                 "providers":providers.all_public(db),"library":list(st.get(db,"library",{}).values()),
                 "stickers":st.get(db,"sticker_inventory",{}),"sticker_sync":st.get(db,"sticker_synced_at"),
                 "last_sticker":next((row[0] for row in db.execute("SELECT body FROM incoming WHERE kind=47 AND peer=? ORDER BY stamp DESC LIMIT 1",(st.get(db,"peer"),))),None),
@@ -215,6 +221,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, (FILES/file).read_bytes(), mime)
             if path == "/api/state":
                 return self.reply(200,state())
+            if path == "/api/groups":
+                cursor=parse_qs(urlsplit(self.path).query).get("cursor",[""])[0]
+                return self.reply(200,group_chats.list_page(cursor))
             if path == "/api/qr":
                 with st.database() as db:
                     ident = st.get(db, "login")
@@ -236,6 +245,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, begin_login())
             if path == "/api/pair":
                 return self.reply(200, pairing())
+            if path == "/api/groups":
+                return self.reply(200,group_chats.configure(data.get("id"),data.get("mode")))
             if path == "/api/settings":
                 return self.reply(200, save_profile(data))
             if path == "/api/providers":
@@ -302,4 +313,5 @@ if __name__ == "__main__":
     providers.initialize()
     for run in (channel_worker.collect, channel_worker.deliver):
         Thread(target=run,daemon=True).start()
+    Thread(target=channel_worker.deliver,args=("group",),daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1",28222),Handler).serve_forever()

@@ -7,6 +7,7 @@ import sqlite3
 
 
 ROOT = Path(os.environ.get("WECHAT_CASE_STATE", "/var/lib/wechat-vps-panel"))
+MAX_HISTORY_TURNS = 100
 DEFAULT = {
     "name": "微信私聊", "persona": "", "worldbook": "", "memory_url": "",
     "persona_id":"", "worldbook_id":"", "memory_id":"",
@@ -17,6 +18,7 @@ DEFAULT = {
     "note_rate":"16000", "call_cue":"off",
     "sticker_vision":"off",
     "merge_messages": True, "merge_wait_seconds": 7,
+    "split_bubbles": True, "history_turns": 30, "pinned_context": "", "private_context": "",
     "tone_service":"off", "tone_model":"", "tone_format":"input_audio",
 }
 
@@ -41,6 +43,9 @@ def init():
             CREATE TABLE IF NOT EXISTS incoming(
                 id TEXT PRIMARY KEY, peer TEXT NOT NULL, kind INTEGER NOT NULL,
                 body TEXT NOT NULL, stamp REAL NOT NULL, turn TEXT);
+            CREATE TABLE IF NOT EXISTS group_inputs(
+                message_id TEXT PRIMARY KEY REFERENCES incoming(id),
+                speaker TEXT NOT NULL, mentioned INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS turns(
                 id TEXT PRIMARY KEY, peer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new',
                 kind TEXT, input TEXT, answer TEXT, wire TEXT, send_id TEXT, receipt TEXT,
@@ -63,6 +68,11 @@ def init():
                 WHERE i.kind=34 AND t.input IS NOT NULL AND length(t.input)>0
                   AND (SELECT count(*) FROM incoming other WHERE other.turn=i.turn)=1;
         """)
+        db.execute("BEGIN IMMEDIATE")
+        if "scope" not in {r["name"] for r in db.execute("PRAGMA table_info(turns)")}:
+            db.execute("ALTER TABLE turns ADD COLUMN scope TEXT NOT NULL DEFAULT 'direct'")
+        db.execute("CREATE INDEX IF NOT EXISTS turns_pending ON turns(scope,peer,status)")
+        db.execute("CREATE INDEX IF NOT EXISTS incoming_turn ON incoming(turn)")
 
 
 def get(db, key, default=None):
@@ -72,6 +82,12 @@ def get(db, key, default=None):
 
 def put(db, key, value):
     db.execute("INSERT OR REPLACE INTO config VALUES(?,?)", (key, json.dumps(value, ensure_ascii=False)))
+
+
+def speaker_line(row):
+    if "speaker" not in row.keys() or not row["speaker"]:
+        return ""
+    return "〔群成员 " + row["speaker"] + (" · @了你" if row["mentioned"] else "") + "〕"
 
 
 def merge_window(settings):
@@ -90,40 +106,47 @@ def profile(db):
     return values
 
 def recent_dialogue(peer,before=None):
-    """Return delivered turns in time order across this private chat and its calls."""
+    """Keep each conversation's speakers, including group turns the assistant sat out."""
     import time
     with database() as db:
+        limit=get(db,"profile",{}).get("history_turns",DEFAULT["history_turns"])
+        if not limit: return []
         until=time.time()
         if before:
             row=db.execute("SELECT MIN(stamp) FROM incoming WHERE turn=?",(before,)).fetchone()
             if row[0] is not None: until=row[0]
-        rows=db.execute("""SELECT t.id,t.input,t.answer,t.kind,MAX(i.stamp) AS stamp
+        rows=db.execute("""SELECT t.id,t.input,t.answer,t.kind,t.scope,t.status,MAX(i.stamp) AS stamp
             FROM turns t JOIN incoming i ON i.turn=t.id
-            WHERE t.peer=? AND t.status='accepted'
+            WHERE t.peer=? AND (t.status='accepted' OR (t.scope='group' AND t.status='silent'))
                 AND (? IS NULL OR t.rowid < (SELECT rowid FROM turns WHERE id=?))
-            GROUP BY t.id ORDER BY t.rowid DESC LIMIT 8""",(peer,before,before)).fetchall()
+            GROUP BY t.id ORDER BY t.rowid DESC LIMIT ?""",(peer,before,before,limit)).fetchall()
         turns=[]
         for row in rows:
-            inputs=db.execute("""SELECT i.kind,i.body,v.transcript,t.tone FROM incoming i
+            inputs=db.execute("""SELECT i.kind,i.body,g.speaker,g.mentioned,v.transcript,t.tone FROM incoming i
+                LEFT JOIN group_inputs g ON g.message_id=i.id
                 LEFT JOIN voice_inputs v ON v.message_id=i.id LEFT JOIN voice_tones t ON t.message_id=i.id
                 WHERE i.turn=? ORDER BY i.rowid""",(row["id"],)).fetchall()
-            if any(x["kind"]==34 and not x["transcript"] for x in inputs):
+            if row["scope"]=="direct" and any(x["kind"]==34 and not x["transcript"] for x in inputs):
                 words="〔历史消息含微信语音，逐条转写不可还原〕\n"+(row["input"] or "")
             else:
                 messages=[]
                 for x in inputs:
-                    if x["kind"]==34:
+                    prefix=speaker_line(x)
+                    if prefix: messages.append(prefix)
+                    if x["kind"]==34 and not x["transcript"]:
+                        messages.append("〔微信语音〕")
+                    elif x["kind"]==34:
                         messages.append("〔微信语音转写〕\n"+x["transcript"]+("〔"+x["tone"]+"〕" if x["tone"] else ""))
                     elif x["kind"]==3: messages.append("〔此前发送了图片〕")
                     else: messages.append(x["body"])
                 words="\n".join(messages)
-            reply=row["answer"] or ""
+            reply=(row["answer"] or "") if row["status"]=="accepted" else ""
             if row["kind"]=="voice" and not reply.startswith("〔微信语音条〕"): reply="〔微信语音条〕\n"+reply
             turns.append((row["stamp"],words,reply))
-        for stamp,words,reply in db.execute("SELECT stamp,words,reply FROM call_lines WHERE peer=? AND stamp<=? ORDER BY stamp DESC,id DESC LIMIT 8",(peer,until)):
+        for stamp,words,reply in db.execute("SELECT stamp,words,reply FROM call_lines WHERE peer=? AND stamp<=? ORDER BY stamp DESC,id DESC LIMIT ?",(peer,until,limit)):
             turns.append((stamp,"〔微信电话〕\n"+words,reply))
     result=[]
-    for _,words,reply in sorted(turns,key=lambda t:t[0])[-8:]:
+    for _,words,reply in sorted(turns,key=lambda t:t[0])[-limit:]:
         result.append({"role":"user","content":words[:2000]})
         if reply: result.append({"role":"assistant","content":reply[:2000]})
     return result
@@ -133,4 +156,4 @@ def remember_call_line(peer,words,reply):
     import time
     with database() as db:
         db.execute("INSERT INTO call_lines(peer,stamp,words,reply) VALUES(?,?,?,?)",(peer,time.time(),words[:2000],reply[:2000]))
-        db.execute("DELETE FROM call_lines WHERE peer=? AND id NOT IN (SELECT id FROM call_lines WHERE peer=? ORDER BY id DESC LIMIT 8)",(peer,peer))
+        db.execute("DELETE FROM call_lines WHERE peer=? AND id NOT IN (SELECT id FROM call_lines WHERE peer=? ORDER BY id DESC LIMIT ?)",(peer,peer,MAX_HISTORY_TURNS))

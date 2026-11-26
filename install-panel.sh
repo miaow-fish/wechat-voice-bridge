@@ -34,7 +34,7 @@ install -d -m 0755 "$stage/panel"
         --no-input --no-cache-dir --no-compile --only-binary=:all: \
         --target "$stage/panel/deps" -r requirements.txt
 )
-install -m 0644 channel_state.py channel_worker.py wechat_case.py deepseek_case.py providers.py pcm_audio.py spoken_reply.py reply_actions.py sensevoice_local.py voice_iat.py account_stickers.py call_channel.py worldbooks.py conversation_prompt.py panel.py index.html panel.js panel.css "$stage/panel/"
+install -m 0644 channel_state.py channel_worker.py group_chats.py wechat_case.py deepseek_case.py providers.py pcm_audio.py spoken_reply.py reply_actions.py sensevoice_local.py voice_iat.py account_stickers.py call_channel.py worldbooks.py conversation_prompt.py panel.py index.html panel.js panel.css "$stage/panel/"
 (
     cd "$stage/panel"
     PYTHONPATH="$PWD/deps" "$python" -B -c 'import aiohttp, PIL.Image, websockets.asyncio.client, panel'

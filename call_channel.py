@@ -326,7 +326,8 @@ def call_messages(cfg, history, current, *, now=None):
               "你的回答会从对方的听筒播出。用一两句自然的口语回应。"
               "你可以自己挂断这通电话。想继续聊就正常说话。想结束就自然地道别，"
               "最后单独写一行 "+END_MARK+"，后台会在你说完后挂断。")
-    return conversation_prompt.build(cfg,prompt,history[-16:],current,now=now)
+    limit=2*cfg.get("history_turns",st.DEFAULT["history_turns"])
+    return conversation_prompt.build(cfg,prompt,history[-limit:] if limit else [],current,now=now,private=True)
 
 
 async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=True,history=None):
@@ -531,7 +532,11 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
             if not complete: continue
             totals["replies"]+=1
             history.append({"role":"assistant","content":answer})
-            del history[:-16]
+            limit=2*cfg.get("history_turns",st.DEFAULT["history_turns"])
+            if limit:
+                del history[:-limit]
+            else:
+                history.clear()
             if cfg.get("_peer"):
                 await asyncio.to_thread(st.remember_call_line,cfg["_peer"],msg["content"],answer)
             if finish:

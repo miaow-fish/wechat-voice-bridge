@@ -7,10 +7,10 @@ const assetNames={persona:"人设",worldbook:"世界书"};
 let selectedRole=sessionStorage.getItem("wx-role")||"asr";
 if(!Object.hasOwn(fields,selectedRole))selectedRole="asr";
 const pages={
-  connect:["微信连接","管理助手的微信登录和私聊配对。"],
+  connect:["微信连接","登录助手微信，选择好友和群聊。"],
   routes:["模型与声音","为每种用途选择实际处理它的服务。"],
   providers:["服务商","管理接口地址、凭据和可用模型。"],
-  profiles:["人设与世界书","选择这段私聊使用的人设与背景资料。"],
+  profiles:["人设与世界书","设置人设、世界书和每次发给模型的上下文。"],
   memory:["外接记忆","管理微信通道与独立记忆系统的连接配置。"],
   stickers:["微信表情","管理助手能发出的表情，以及收到表情时的识别方式。"],
   activity:["通话与记录","发起微信电话，查看语音和消息的投递情况。"]
@@ -43,6 +43,40 @@ async function api(path,data){
 }
 async function withButton(b,work,feedback=notice){b.disabled=true;try{await work();}catch(e){feedback(e.message);}finally{b.disabled=false;}}
 function service(id){return live.providers.find(s=>s.id===id);}
+const availableGroups = new Map();
+let groupCursor = "", groupListLoaded = false, lastRoutes;
+function showGroups(routes) {
+  const list=el("groupList");
+  list.replaceChildren();
+  const groups=new Map(availableGroups);
+  for(const [id,entry] of Object.entries(routes)) groups.set(id,entry.name);
+  for(const [id,name] of groups) {
+    const control=node("select");
+    for(const [value,title] of [["off","关闭"],["auto","由助手决定"],["mention","仅 @助手 时参与"]])
+      control.append(option(value,title));
+    control.value=routes[id]?.mode || "off";
+    control.onchange=async()=>{
+      const mode=control.value;
+      control.disabled=true;
+      try {const result=await api("groups",{id,mode});await refresh();notice(result.message);}
+      catch(e){control.value=live.group_routes?.[id]?.mode || "off";notice(e.message);}
+      finally{control.disabled=false;}
+    };
+    list.append(label(name,control));
+  }
+  const count=Object.keys(routes).length;
+  el("groupState").textContent=groupListLoaded&&!groups.size?"微信账号还没有可选的群":
+    count?"已启用 "+count+" 个群":"尚未启用群聊";
+  el("readGroups").textContent=groupCursor?"查看更多群":groupListLoaded?"刷新群列表":"选择微信群";
+}
+el("readGroups").onclick=e=>withButton(e.currentTarget,async()=>{
+  const page=await api("groups"+(groupCursor?"?cursor="+encodeURIComponent(groupCursor):""));
+  if(!groupCursor) availableGroups.clear();
+  for(const item of page.items) availableGroups.set(item.id,item.name);
+  groupCursor=page.nextCursor || "";
+  groupListLoaded=true;
+  showGroups(live.group_routes || {});
+});
 const mergeSwitch = el("mergeMessages"), mergeSeconds = el("mergeSeconds");
 mergeSeconds.max = String(Number.MAX_SAFE_INTEGER);
 function syncMergeControls() {
@@ -195,11 +229,15 @@ function applyState(s,force=false,discard=[]){
   for(const key of discard)delete changes[key];
   const updated=JSON.stringify(s.settings)!==JSON.stringify(baseline);
   live=s;
+  const routes=JSON.stringify(s.group_routes || {});
+  if(routes!==lastRoutes){showGroups(s.group_routes || {});lastRoutes=routes;}
+  el("readGroups").disabled=!s.logged;
   baseline={...s.settings};cfg={...baseline,...changes};
   const stamp=JSON.stringify([s.providers,s.library,s.local_tone_available]);
   if(force||updated||stamp!==controlStamp){
-    for(const name of ["name","memory_url","sticker_vision"])el("settings").elements[name].value=cfg[name];
+    for(const name of ["name","memory_url","sticker_vision","pinned_context","private_context","history_turns"])el("settings").elements[name].value=cfg[name];
     mergeSwitch.checked = cfg.merge_messages;
+    el("splitBubbles").checked=cfg.split_bubbles;
     mergeSeconds.value = cfg.merge_wait_seconds ?? "";
     syncMergeControls();
     renderServices();renderModules();renderAssets();controlStamp=stamp;
@@ -210,7 +248,7 @@ function applyState(s,force=false,discard=[]){
   el("memoryState").textContent=s.settings.memory_url?"已登记地址":"未配置";
   el("wxstate").textContent=s.logged?"已登录":ended?"上一次登录已结束，可以重新取码":l.state?"等待手机扫码或确认":"尚未登录";
   el("login").disabled=s.logged;el("pair").disabled=!s.logged||s.paired;
-  el("pairstate").textContent=s.paired?"已绑定，只有这个私聊会触发回复":s.logged?"请生成口令并私发给助手号":"等待助手号登录";
+  el("pairstate").textContent=s.paired?"已绑定，助手可以在这段私聊中回复":s.logged?"请生成口令并私发给助手号":"等待助手号登录";
   el("pairbox").hidden=!s.paircode||s.paired;
   if(s.paircode)el("paircode").textContent=s.paircode;
   const show=!s.logged&&!ended&&Boolean(l.generation);el("scan").hidden=!show;
@@ -231,7 +269,7 @@ function applyState(s,force=false,discard=[]){
   const call=s.call||{};el("callStatus").textContent=(call.stage||"尚未测试")+" · 收到音频 "+((call.received||0)*.02).toFixed(1)+" 秒 · 发出音频 "+((call.sent||0)*.02).toFixed(1)+" 秒";
   if(call.latencyMs)el("callStatus").textContent+=" · 上一轮开口用时 "+(call.latencyMs["到第一帧"]/1000).toFixed(1)+" 秒";
   el("dialCall").disabled=el("answerCall").disabled=!s.logged||!s.paired||Boolean(call.active);el("stopCall").disabled=!call.active;
-  el("last").textContent=!s.last?"还没有私聊测试记录":s.last.status==="accepted"?"最近一轮已取得微信回执":s.last.status==="call_connected"?"最近一通微信电话已接通":s.last.status==="call_requested"?"已发起微信通话":s.last.error||"正在处理本轮消息";
+  el("last").textContent=!s.last?"还没有聊天记录":s.last.status==="silent"?"最近一轮群聊，助手选择旁听":s.last.status==="disabled"?"本轮已随群聊设置关闭":s.last.status==="accepted"?"最近一轮已取得微信回执":s.last.status==="call_connected"?"最近一通微信电话已接通":s.last.status==="call_requested"?"已发起微信通话":s.last.error||"正在处理本轮消息";
   if(s.cursor_gap)el("last").textContent+="。曾有微信事件过期，期间可能漏收。";
 }
 let stateReads=Promise.resolve();
