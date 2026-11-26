@@ -1,0 +1,478 @@
+"""Read new direct messages and deliver replies only to the operator's paired chat."""
+from datetime import datetime
+import hashlib
+import hmac
+import json
+import re
+import subprocess
+import time
+from urllib.error import HTTPError, URLError
+
+import account_stickers
+import call_channel
+import channel_state as st
+import conversation_prompt
+import deepseek_case as ds
+import pcm_audio
+import providers
+import reply_actions
+import spoken_reply
+from wechat_case import cli, esc, image_type, media, wx
+
+CALL_REQUEST = re.compile(
+    r"(?:(?:你|请|现在|那|快|再|主动|能不能|可以|能|麻烦|帮我|用微信))*"
+    r"(?:(?:给我)?(?:打(?:一?个|通|下)?(?:微信|语音)?电话(?:给我)?|回(?:个|一通)?电话(?:给我)?)"
+    r"|打给我|打过来|回拨(?:给我)?|给我回拨|给我来(?:一?个|通)?电话)"
+    r"(?:过来|来|好不好|可以吗|好吗|一下|吧|呀|嘛|呗|啦|哈|啊|哦)*"
+)
+CALL_CANCEL = re.compile(r"(?:算了|不用了|(?:先)?(?:别|不用|不要)(?:再)?(?:给我)?打(?:电话|了|给我|过来)?(?:了)?)")
+VOICE_DENIAL = re.compile(r"(?:我.{0,8})?(?:发不了|不能发|没法发|不支持发|无法发)(?:送)?(?:微信)?语音|只能(?:打字|文字)(?:回复|聊天|回)")
+VOICE = re.compile(
+    r"^(?:(?:你|请|给我|能不能|能否|可不可以|可以|能|再|也|用微信|帮我)\s*)*"
+    r"(?:发[一条个段下\s]*语音(?:条|消息)?|用?语音回(?:复)?(?:我)?|用语音说(?:一句|句话|几句)?)"
+    r"(?:给我|让我|来)?(?:听一听|听一下|听听|试听|试试)?[吧呀嘛吗呗啦呢哈啊～~！!。？?\s]*$"
+)
+
+
+def mode_for(lines):
+    call_cancelled=False
+    for line in reversed(lines):
+        cmd = line.partition("\n〔引用〕")[0].strip()
+        call_text=re.sub(r"[\s，,。！!？?～~]","",cmd)
+        if CALL_CANCEL.fullmatch(call_text):
+            call_cancelled=True
+        if not call_cancelled and len(call_text)<=100 and re.fullmatch(r"(?:"+CALL_REQUEST.pattern+r")+",call_text):
+            return "call",""
+        wanted = account_stickers.request_name(cmd)
+        if wanted is not None:
+            return "sticker", wanted
+        if cmd == "/语音" or cmd.startswith("/语音 ") or VOICE.fullmatch(cmd):
+            return "voice", cmd[3:].strip() if cmd.startswith("/语音 ") else ""
+    return "text", ""
+
+
+def valid_pair(pair, body):
+    return bool(pair and pair["expires"] >= time.time() and
+                hmac.compare_digest(pair["hash"],hashlib.sha256(body.encode()).hexdigest()))
+
+
+def ingest(db, event):
+    data = event.get("data") or {}
+    if event.get("kind") != "message.committed":
+        return
+    peer, mid = data.get("threadId"), data.get("messageId")
+    bound = st.get(db,"peer")
+    if not peer or not mid or (bound and bound != peer):
+        return
+    if data.get("direction") == "outgoing" and bound == peer and data.get("origin") in ("local_send","live"):
+        db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE peer=? AND status='collecting'",(peer,))
+        return
+    if data.get("direction") != "incoming" or data.get("origin") != "live":
+        return
+    pair = st.get(db,"pair",{})
+    if not bound and pair.get("expires",0) < time.time():
+        return
+    if db.execute("SELECT 1 FROM incoming WHERE id=?",(mid,)).fetchone():
+        return
+    try:
+        msg = wx("/messages/" + esc(mid))
+    except HTTPError as err:
+        if err.code == 404:
+            return
+        raise
+    if (msg.get("direction") != "incoming" or msg.get("id") != mid or msg.get("threadId") != peer
+            or msg.get("senderId") != peer or msg.get("recall")):
+        return
+    kind = msg.get("type")
+    body = (msg.get("body") if isinstance(msg.get("body"),str) else "").strip()
+    if not bound:
+        if kind == 1 and valid_pair(pair,body) and wx("/threads/"+esc(peer)).get("kind") == "direct":
+            db.execute("BEGIN IMMEDIATE")
+            if not st.get(db,"peer") and valid_pair(st.get(db,"pair",{}),body):
+                st.put(db,"peer",peer)
+                st.put(db,"pair",{})
+        return
+    if body.startswith("微信配对 "):
+        return
+    if kind == 49 and msg.get("appMessageType") == 57:
+        ref = (msg.get("quote") or {}).get("embeddedText")
+        body = body + ("\n〔引用〕" + ref[:1500] if isinstance(ref,str) and ref.strip() else "")
+        kind = 1
+    elif kind == 47 or (kind == 49 and msg.get("appMessageType") == 8):
+        kind = 47
+        body = account_stickers.incoming_label(msg,body,st.get(db,"sticker_names",{}))
+    elif kind not in (1,3,34):
+        return
+    if kind == 1 and not body:
+        return
+    if kind in (3,34):
+        body = ""
+    try:
+        stamp = datetime.fromisoformat(event["createdAt"]).timestamp()
+    except (KeyError,TypeError,ValueError):
+        stamp = time.time()
+    db.execute("BEGIN IMMEDIATE")
+    wait_seconds = st.merge_window(st.get(db, "profile", {}))
+    active = db.execute("SELECT id,next_try FROM turns WHERE status='collecting' AND peer=? ORDER BY rowid DESC LIMIT 1",(peer,)).fetchone()
+    if wait_seconds and active and stamp <= active["next_try"]:
+        turn = active["id"]
+        db.execute("UPDATE turns SET next_try=max(next_try,?) WHERE id=?", (stamp + wait_seconds, turn))
+    else:
+        if active:
+            db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE id=?", (active["id"],))
+        turn = hashlib.sha256((peer+"\n"+mid).encode()).hexdigest()
+        status = "collecting" if wait_seconds else "ready"
+        deadline = stamp + wait_seconds if wait_seconds else 0
+        db.execute("INSERT INTO turns(id,peer,status,next_try) VALUES(?,?,?,?)", (turn, peer, status, deadline))
+    db.execute("INSERT INTO incoming VALUES(?,?,?,?,?,?)",(mid,peer,kind,body[:16000],stamp,turn))
+
+
+def collect():
+    while True:
+        try:
+            with st.database() as db:
+                cursor = st.get(db,"cursor")
+                if cursor is None:
+                    cursor = wx("/events?newest=true&limit=1").get("nextCursor","0")
+                    st.put(db,"cursor",cursor)
+            try:
+                page = wx("/events?after=" + esc(cursor) + "&limit=100")
+            except HTTPError as exc:
+                problem = json.loads(exc.read(4096)).get("error",{})
+                if problem.get("code") != "event_cursor_expired":
+                    raise
+                page = wx("/events?newest=true&limit=100")
+                with st.database() as db:
+                    if not page.get("items"):
+                        st.put(db,"cursor",page.get("nextCursor","0"))
+                    st.put(db,"cursor_gap",True)
+            for event in page.get("items",[]):
+                with st.database() as db:
+                    ingest(db,event)
+                    st.put(db,"cursor",event["cursor"])
+            time.sleep(.12 if len(page.get("items",[])) == 100 else 1.2)
+        except Exception as exc:
+            print("event poll:",type(exc).__name__,getattr(exc,"code",""),flush=True)
+            time.sleep(5)
+
+
+def input_parts(rows, settings):
+    parts, lines, sources = [], [], []
+    pixels = 0
+    for row in rows:
+        body = row["body"]
+        if row["kind"] == 3:
+            data = media(row["id"],("original","standard","normal"))
+            pixels += len(data)
+            if pixels > 12 * 1024 * 1024:
+                raise ValueError("本轮图片总量超过 12 MiB")
+            parts.append(ds.image_part(data,image_type(data)))
+            lines.append("〔图片〕")
+            sources.append("微信图片（已附实际画面）")
+            continue
+        if row["kind"] == 34:
+            with st.database() as db:
+                prior=db.execute("""SELECT v.transcript,t.tone,v.provider FROM voice_inputs v
+                            LEFT JOIN voice_tones t USING(message_id) WHERE v.message_id=?""",(row["id"],)).fetchone()
+            if prior:
+                body,tone,provider=prior
+            else:
+                pcm=pcm_audio.samples(media(row["id"],("normal","standard")),from_wechat=True)
+                body,tone,provider,status=providers.hear_utterance(settings,pcm)
+                with st.database() as db:
+                    inserted=db.execute("INSERT OR IGNORE INTO voice_inputs(message_id,transcript,provider) VALUES(?,?,?)",
+                                        (row["id"],body,provider))
+                    if inserted.rowcount and status!="off":
+                        db.execute("INSERT INTO voice_tones VALUES(?,?,?)",(row["id"],tone,status))
+            sources.append("微信语音条（"+(provider or "通道")+"已转写）")
+            parts.append({"type":"text","text":"〔语音转写〕\n"+providers.with_tone(body,tone)})
+        else:
+            if row["kind"]==47 and body==account_stickers.UNKNOWN:
+                try:
+                    body=account_stickers.received(row["id"],settings)
+                except (OSError,ValueError,KeyError,IndexError) as exc:
+                    print("sticker read:",type(exc).__name__,flush=True)
+                if body!=account_stickers.UNKNOWN:
+                    with st.database() as db:
+                        db.execute("UPDATE incoming SET body=? WHERE id=? AND kind=47",(body,row["id"]))
+            sources.append("微信表情包" if row["kind"]==47 else "微信文字")
+            parts.append({"type":"text","text":body})
+        lines.append(body)
+    return parts,lines,sources
+
+
+def update(turn, *, action=False, **values):
+    fields = ", ".join(k+"=?" for k in values)
+    with st.database() as db:
+        table="turn_actions" if action else "turns"
+        db.execute("UPDATE "+table+" SET "+fields+" WHERE id=?",(*values.values(),turn))
+
+
+def history(peer,current):
+    return st.recent_dialogue(peer,current)
+
+
+def reply_messages(settings,peer,current,kind,parts,sources,*,now=None):
+    system="你在微信私聊中直接回复对方。可以简短，按当前消息的语境回答。"
+    voice_on=bool(settings["tts"]!="off" and settings.get("voice"))
+    call_on=voice_on and settings["asr"]!="off"
+    system+="\n当前微信功能：表情包由通道从这个微信号的已下载表情中选择并发送。"
+    system+=("语音条可用，助手自己决定说什么，系统用已配置的音色发送。" if voice_on else "语音条暂未启用。")
+    system+=("一对一微信电话可用，收到当前联系人的明确回拨请求会实际拨号。" if call_on else "一对一微信电话暂未配置完整。")
+    system+="有关功能以当前状态为准。历史回答只是当时说过的话。"
+    system+="\n"+reply_actions.RULES
+    if settings["asr"]!="off":
+        system+="\n收到微信语音时，按转写内容回应，语气标注只供理解本句。"
+    if voice_on:
+        system+="\n"+(spoken_reply.VOICE_INSTRUCTION if providers.has_audio_tags(settings)
+                     else "用语音条时，台词写成可以直接朗读的话。")
+    recent=history(peer,current)
+    notes=[]
+    if any(s!="微信文字" for s in sources):
+        notes.append("来源（依次）："+"、".join(sources))
+    if kind=="voice":
+        notes.append("对方这轮想听语音，按语音代号回复。")
+    return conversation_prompt.build(settings,system,recent,parts,notes,now=now)
+
+
+def dispatch_call(ident,peer,lines):
+    # Reserve before opening a live call. A replay or ambiguous outcome must
+    # never ring the same person twice for one WeChat message.
+    with st.database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        claimed=db.execute("""UPDATE turns SET status='call_requested',kind='call',phase='dial',input=?
+            WHERE id=? AND peer=? AND status IN ('collecting','sealed','ready')""",("\n".join(lines),ident,peer))
+    if not claimed.rowcount:
+        return
+    try:
+        call_channel.start("dial",expected_peer=peer,turn_id=ident)
+    except Exception as exc:
+        update(ident,status="failed",error=explain(exc),phase="dial")
+
+
+def allows_model_call(lines):
+    words=" ".join(x.partition("\n〔引用〕")[0] for x in lines)
+    if re.search(r"举例|代号|代码|什么[意含]思|别打|不要打|不许打|不用打|别给我打|不要给我打|如果|假如|他说|她说",words):
+        return False
+    return bool(re.search(r"打给我|打过来|回拨|给我.{0,8}(?:电话|打)|(?:打|来|通).{0,8}电话|来.{0,4}语音通话",words))
+
+
+def sticker_context(peer,ident,lines,assistant_text=""):
+    recent=history(peer,ident)[-4:]
+    return "\n".join([m["content"][-140:] for m in recent]+lines[-3:]+[assistant_text[:160]]).strip()[-640:]
+
+
+def save_plan(ident,lines,parts,hint):
+    rows=[]
+    display=[]
+    for index,(kind,value) in enumerate(parts):
+        wire=None
+        if kind=="voice":
+            spoken=spoken_reply.parse(value)
+            value=spoken.words
+            wire=json.dumps({"delivery":spoken.delivery},ensure_ascii=False)
+        label={"voice":"〔微信语音条〕","sticker":"〔微信表情包〕","text":""}[kind]
+        display.append(label+value)
+        rows.append((ident+"-"+str(index),ident,index,kind,value,hint if kind=="sticker" else "",wire))
+    with st.database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone(): return
+        db.executemany("INSERT INTO turn_actions(id,turn_id,pos,kind,answer,requested,wire) VALUES(?,?,?,?,?,?,?)",rows)
+        db.execute("UPDATE turns SET input=?,answer=?,kind=?,phase='media' WHERE id=?",
+                   ("\n".join(lines),"\n".join(display),parts[0][0] if len(parts)==1 else "mixed",ident))
+
+
+def deliver_plan(ident,peer,settings):
+    with st.database() as db:
+        records=db.execute("SELECT * FROM turn_actions WHERE turn_id=? ORDER BY pos",(ident,)).fetchall()
+    for r in records:
+        if r["status"]!="accepted":
+            deliver_action(r,peer,settings,requested=r["requested"],action=True,descriptive=True)
+    with st.database() as db:
+        final=db.execute("SELECT receipt FROM turn_actions WHERE turn_id=? ORDER BY pos DESC LIMIT 1",(ident,)).fetchone()
+    update(ident,status="accepted",phase="receipt",error=None,receipt=final[0])
+
+
+def process(turn):
+    ident, peer = turn["id"], turn["peer"]
+    with st.database() as db:
+        if peer != st.get(db,"peer"):
+            raise ValueError("私聊绑定已改变")
+        settings = st.profile(db)
+        rows = db.execute("SELECT * FROM incoming WHERE turn=? ORDER BY rowid",(ident,)).fetchall()
+        planned=db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone()
+    if planned:
+        deliver_plan(ident,peer,settings)
+        return
+    answer, kind, job_id = turn["answer"],turn["kind"],turn["send_id"]
+    voice_wire = turn["wire"] if kind == "voice" else None
+    chosen = None
+    if not answer:
+        update(ident,phase="read")
+        parts, lines, sources = input_parts(rows,settings)
+        kind, literal = mode_for(lines)
+        if kind=="call":
+            dispatch_call(ident,peer,lines)
+            return
+        if kind == "voice" and settings["tts"] == "off":
+            raise ValueError("私聊配置已关闭语音合成")
+        if kind == "sticker":
+            requested=next((details for line in reversed(lines) if (details:=account_stickers.request_details(line)) is not None),("",False))
+            exact=requested[1]
+            hint=literal or sticker_context(peer,ident,lines)
+            chosen = account_stickers.choose(ident,hint,description_settings=None if exact else settings)
+            answer = "〔" + chosen["group"] + " · " + chosen["label"] + "〕"
+        elif literal:
+            answer = literal
+        else:
+            update(ident,phase="model")
+            vision = any(p["type"] == "image_url" for p in parts)
+            messages=reply_messages(settings,peer,ident,kind,parts,sources)
+            answer = providers.chat(settings,messages,vision=vision)
+            if kind=="voice" and VOICE_DENIAL.search(answer):
+                messages=conversation_prompt.with_chat_note(messages,"语音条已准备好发送。请直接和对方聊一句，自选内容，无需解释功能。")
+                answer=providers.chat(settings,messages,vision=vision)
+                if VOICE_DENIAL.search(answer):
+                    raise ValueError("回复与当前可用的微信语音功能矛盾，正在重新生成")
+            plan=reply_actions.parse(answer)
+            if plan and plan[0][0]=="call":
+                if allows_model_call(lines):
+                    dispatch_call(ident,peer,lines)
+                    return
+                messages=conversation_prompt.with_chat_note(messages,"本轮对方没有邀请回拨。直接回答这轮的话。")
+                answer=providers.chat(settings,messages,vision=vision)
+                plan=reply_actions.parse(answer)
+                if plan and plan[0][0]=="call":
+                    raise ValueError("这轮没有明确的回拨请求")
+            if plan:
+                resolved=[]
+                for action,value in plan:
+                    if action=="voice" and settings["tts"]=="off":
+                        raise ValueError("私聊配置已关闭语音合成")
+                    if action=="voice" and not value:
+                        writing=conversation_prompt.with_chat_note(messages,"你已选择用语音回复。根据同一段对话写下想说的话。这次只输出台词。")
+                        value=providers.chat(settings,writing,vision=vision)
+                        if reply_actions.parse(value) or VOICE_DENIAL.search(value):
+                            raise ValueError("语音台词仍未生成")
+                    resolved.append((action,value))
+                if kind=="voice" and not any(a=="voice" for a,_ in resolved):
+                    raise ValueError("本轮请求语音，生成内容缺少语音台词")
+                hint=sticker_context(peer,ident,lines," ".join(v for a,v in resolved if a!="sticker")) if any(a=="sticker" for a,_ in resolved) else ""
+                save_plan(ident,lines,resolved,hint)
+                deliver_plan(ident,peer,settings)
+                return
+        if kind == "voice":
+            spoken = spoken_reply.parse(answer)
+            answer = spoken.words
+            voice_wire = json.dumps({"delivery":spoken.delivery},ensure_ascii=False)
+            update(ident,input="\n".join(lines),answer=answer,kind=kind,wire=voice_wire)
+        else:
+            update(ident,input="\n".join(lines),answer=answer,kind=kind)
+    with st.database() as db:
+        record=db.execute("SELECT * FROM turns WHERE id=?",(ident,)).fetchone()
+    deliver_action(record,peer,settings,requested=mode_for([r["body"] for r in rows])[1],chosen=chosen)
+
+
+def deliver_action(record,peer,settings,*,requested="",chosen=None,action=False,descriptive=False):
+    ident=record["id"]
+    kind,answer,job_id=record["kind"],record["answer"],record["send_id"]
+    voice_wire=record["wire"] if kind=="voice" else None
+    def save(**values):
+        update(ident,action=action,**values)
+    if not job_id:
+        save(phase="media")
+        key = "reply-"+ident
+        if kind == "sticker":
+            if not chosen:
+                with st.database() as db:
+                    chosen = st.get(db,"sticker:"+ident)
+            existing = record["wire"] if chosen else None
+            if not chosen:
+                chosen = account_stickers.choose(ident,requested,description_settings=settings if descriptive else None)
+                save(answer="〔"+chosen["group"]+" · "+chosen["label"]+"〕")
+            if existing:
+                account_stickers.ensure_owned(chosen)
+            wire = json.loads(existing) if existing else account_stickers.prepare(chosen)
+            save(wire=json.dumps(wire),phase="send")
+            job = wx("/sends",{"threadId":peer,"kind":"sticker","source":wire},key)
+        elif kind == "voice":
+            path = st.ROOT/(ident+".wav")
+            if not path.exists():
+                delivery = json.loads(voice_wire)["delivery"] if voice_wire and providers.has_audio_tags(settings) else answer
+                audio = providers.synthesize(settings,delivery)
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(audio)
+                tmp.replace(path)
+            else:
+                # A retry may find an audio file staged by an older release.
+                # Validate it without changing the source of an idempotent send.
+                pcm_audio.samples(path.read_bytes())
+            save(phase="send")
+            job = cli("messages","send",peer,"--voice",path,"--idempotency-key",key,"--detach")
+        else:
+            save(phase="send")
+            job = wx("/sends",{"threadId":peer,"text":answer},key)
+        job_id = job["id"]
+        save(send_id=job_id)
+    save(phase="receipt")
+    for _ in range(20):
+        receipt = wx("/sends/"+esc(job_id))
+        detail = receipt.get("result") or {}
+        if (receipt.get("destination") or receipt.get("threadId")) != peer:
+            raise ValueError("微信回执的目标私聊不匹配")
+        sent = receipt.get("state")
+        if sent == "accepted" or (kind=="sticker" and sent=="available" and detail.get("serverAcceptance")=="accepted"):
+            server = receipt.get("serverId") or receipt.get("serverMessageId") or detail.get("serverMessageId")
+            if not server:
+                raise ValueError("微信未提供可核验的消息编号")
+            save(status="accepted",receipt=str(server),error=None)
+            if kind == "sticker":
+                with st.database() as db:
+                    picked = st.get(db,"sticker:"+ident)
+                    if picked:
+                        st.put(db,"last_owned_sticker",picked["item"])
+            (st.ROOT/(ident+".wav")).unlink(missing_ok=True)
+            return
+        if sent in ("failed","rejected","needs_review","cancelled","expired","available","uncertain"):
+            raise ValueError("微信未确认接收："+str(sent))
+        time.sleep(.75)
+    raise TimeoutError("微信投递回执仍在等待")
+
+
+def explain(exc):
+    if isinstance(exc,HTTPError):
+        site = "微信" if exc.url.startswith("http://127.0.0.1:28220/") else "模型服务"
+        return site + "接口返回 HTTP " + str(exc.code)
+    if isinstance(exc,FileNotFoundError) and not ds.KEY.exists():
+        return "请先在管理页保存 DeepSeek Key"
+    if isinstance(exc,subprocess.SubprocessError):
+        return "微信音频处理暂时失败"
+    if isinstance(exc,(ValueError,TimeoutError)):
+        return str(exc)[:120]
+    if isinstance(exc,URLError):
+        return "上游服务暂时无法连接"
+    return "操作失败（"+type(exc).__name__+"）"
+
+
+def deliver():
+    while True:
+        try:
+            with st.database() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT * FROM turns WHERE status IN ('collecting','sealed','ready') ORDER BY rowid LIMIT 1").fetchone()
+                if row and row["next_try"] <= time.time():
+                    db.execute("UPDATE turns SET status='ready' WHERE id=?",(row["id"],))
+                else:
+                    row = None
+            if not row:
+                time.sleep(.4)
+                continue
+            try:
+                process(row)
+            except Exception as exc:
+                attempts = row["attempts"] + 1
+                update(row["id"],status="failed" if attempts >= 3 else "ready",attempts=attempts,
+                       error=explain(exc),next_try=time.time()+5*attempts)
+        except Exception as exc:
+            print("delivery worker:",type(exc).__name__,flush=True)
+            time.sleep(3)

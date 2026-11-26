@@ -1,0 +1,28 @@
+[Unit]
+Description=WeChat private channel manager
+After=wechat-vps-case.service network-online.target
+Wants=wechat-vps-case.service network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=wechat-vps-panel
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/wechat-vps-panel
+Environment=HOME=/var/lib/wechat-vps-panel
+Environment=PYTHONPATH=/opt/wechat-vps-case/panel/deps
+LoadCredential=wechat.token:/etc/wechat-vps-case/wechat.token
+ExecStart=/usr/bin/python3 -B -u /opt/wechat-vps-case/panel/panel.py
+Restart=on-failure
+RestartSec=4
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+Nice=5
+MemoryHigh=112M
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

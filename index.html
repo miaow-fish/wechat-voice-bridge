@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>微信助手 · 私聊工作台</title><link rel="stylesheet" href="/panel.css"><script defer src="/panel.js"></script></head>
+<body><div class="shell">
+<aside class="rail"><div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><strong>微信助手</strong><small>私聊工作台</small></div></div>
+<button type="button" id="menuButton" class="secondary" aria-controls="sections" aria-expanded="false">菜单</button>
+<nav id="sections" aria-label="工作台"><a href="#connect"><i aria-hidden="true">◉</i>微信连接</a><a href="#routes"><i aria-hidden="true">≋</i>模型与声音</a><a href="#providers"><i aria-hidden="true">⌘</i>服务商</a><a href="#profiles"><i aria-hidden="true">▤</i>人设与世界书</a><a href="#memory"><i aria-hidden="true">◎</i>外接记忆</a><a href="#stickers"><i aria-hidden="true">☺</i>微信表情</a><a href="#activity"><i aria-hidden="true">↗</i>通话与记录</a></nav>
+<div class="status" id="summary" role="status">连接中…</div></aside>
+<main><header class="page-head"><h1 id="pageTitle">微信连接</h1><p id="pageDesc">管理助手的微信登录和私聊配对。</p></header>
+<form id="settings" novalidate>
+<section id="connect" class="view">
+<div class="card"><div class="row"><div><h2>助手账号</h2><p id="wxstate">读取登录状态…</p></div><button type="button" id="login">显示登录二维码</button></div>
+<div id="scan" hidden><img id="qr" width="216" height="216" alt="用助手号扫描的微信登录码"><p>在手机上确认 Linux 登录。同账号的其他电脑端可能会下线。</p></div>
+<div class="row"><div><h2>绑定私聊</h2><p id="pairstate">等待读取</p></div><button class="secondary" type="button" id="pair" disabled>生成配对口令</button></div>
+<div id="pairbox" hidden><p>用日常微信把这句私发给助手号。口令十分钟内有效。</p><output id="paircode"></output></div></div>
+<div class="card">
+  <h2>私聊回复</h2>
+  <div class="row space">
+    <label for="mergeMessages">合并连续消息</label>
+    <input class="switch" id="mergeMessages" name="merge_messages" type="checkbox" role="switch" aria-describedby="mergeHelp" checked>
+  </div>
+  <p id="mergeHelp">每收到一条就重新计时，等你发完再一起回复。</p>
+  <label class="space" for="mergeSeconds">等待时长（秒）</label>
+  <input id="mergeSeconds" name="merge_wait_seconds" type="number" inputmode="numeric" min="1" step="1" value="7" required>
+  <div class="savebar"><button type="submit">保存回复设置</button></div>
+</div></section>
+<section id="providers" class="view" hidden><div class="toolbar"><button type="button" id="addService">＋ 添加服务商</button></div><div id="services" class="service-list"></div></section>
+<section id="routes" class="view" hidden><div class="route-layout card"><div id="roleMenu" class="role-menu" aria-label="模型用途"></div><div id="moduleRows"></div></div><div class="savebar"><button>保存模型设置</button></div></section>
+<section id="profiles" class="view" hidden><div class="card"><label>私聊配置名称<input name="name" required maxlength="80"></label></div>
+<div id="assets" class="assets"></div><div class="savebar"><button>保存资料选择</button></div></section>
+<section id="memory" class="view" hidden><div class="card"><div class="section-head"><h2>外部记忆服务</h2><span class="pill" id="memoryState"></span></div>
+<p>登记独立部署的记忆服务地址。当前微信通道尚未接入记忆读写接口。</p>
+<label class="space">服务地址<input type="url" name="memory_url" placeholder="https://memory.example.com" spellcheck="false"></label><div id="legacyMemory"></div></div><div class="savebar"><button>保存服务地址</button></div></section>
+<section id="stickers" class="view" hidden><div class="card"><div class="section-head"><div><h2>助手账号的表情库</h2><p id="stickerSyncTime"></p></div><button type="button" class="secondary" id="syncStickers">同步微信表情库</button></div>
+<p>从当前登录的微信号读取已添加的整包和收藏。原图在发送时按需下载。</p><div id="stickerGroups" class="pack-grid"></div></div>
+<div class="card"><h2>收到别人的表情</h2><label class="space">没有微信名称时<select name="sticker_vision"><option value="off">仅对照助手表情库</option><option value="once">首次用已配置的识图服务，再次收到直接复用</option></select></label>
+<p id="lastSticker"></p></div><div class="savebar"><button>保存识别方式</button></div></section>
+</form>
+<section id="activity" class="view" hidden><div class="card"><h2>微信语音电话</h2><p id="callStatus"></p><p>点「等待来电」后，已绑定的联系人可在两分钟内打来。</p>
+<div class="controls space"><button type="button" id="dialCall">拨给已绑定的私聊</button><button type="button" class="secondary" id="answerCall">等待来电</button><button type="button" class="secondary" id="stopCall" disabled>结束通话</button></div></div>
+<div class="card"><h2>投递记录</h2><p id="deliveries"></p><p id="last"></p><details id="speechBox" hidden><summary>最近一条语音的转写</summary><p id="speech"></p></details></div></section>
+</main></div>
+<dialog id="serviceDialog"><form id="serviceForm"><div class="section-head"><h2 id="serviceTitle">添加服务商</h2><button class="close" type="button" data-close="serviceDialog" aria-label="关闭">×</button></div>
+<label>服务商名称<input name="name" required maxlength="80" placeholder="例如，硅基流动"></label>
+<label>接口类型<select name="kind"><option value="compatible">OpenAI 兼容接口</option><option value="elevenlabs">ElevenLabs 语音合成</option><option value="xfyun">讯飞语音听写</option><option value="deepseek">DeepSeek 官方接口</option></select></label>
+<label id="baseLabel">API 地址<input name="base" placeholder="https://api.siliconflow.cn/v1" spellcheck="false"></label>
+<label id="appidLabel">讯飞 APPID<input name="app_id" autocomplete="off"></label><label>API Key<input name="key" type="password" autocomplete="new-password"></label>
+<label id="secretLabel">讯飞 API Secret<input name="secret" type="password" autocomplete="new-password"></label>
+<label id="manualLabel">手动添加模型 ID <small>每行一个</small><textarea name="manual" rows="3" spellcheck="false"></textarea></label>
+<div class="controls"><button>保存服务商</button><button class="secondary" type="button" id="syncService">保存并读取模型</button></div><p class="result" id="serviceResult" role="status"></p></form></dialog>
+<dialog id="assetDialog"><form id="assetForm"><div class="section-head"><h2 id="assetTitle">编辑资料</h2><button class="close" type="button" data-close="assetDialog" aria-label="关闭">×</button></div>
+<input type="hidden" name="kind"><input type="hidden" name="format"><label>名称<input name="name" required maxlength="80"></label><p id="importInfo"></p>
+<label><span id="assetBodyLabel">正文</span><textarea name="body" required rows="9"></textarea></label>
+<button>保存并选用</button><p class="result" id="assetResult" role="status"></p></form></dialog>
+<input id="worldbookFile" type="file" accept=".json,.txt,.md,.docx" hidden>
+<div id="notice" role="status" aria-live="polite" hidden></div></body></html>

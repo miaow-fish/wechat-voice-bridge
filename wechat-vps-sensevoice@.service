@@ -1,0 +1,23 @@
+[Unit]
+Description=WeChat utterance tone recognition
+
+[Service]
+DynamicUser=yes
+User=wechat-vps-tone
+Environment=PYTHONPATH=/opt/wechat-vps-case/sensevoice/runtime
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/usr/bin/python3 -B /opt/wechat-vps-case/panel/sensevoice_local.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+MemoryMax=410M
+MemorySwapMax=0
+CPUQuota=100%
+Nice=10
+RuntimeMaxSec=32

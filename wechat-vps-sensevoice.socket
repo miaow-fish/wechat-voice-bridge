@@ -1,0 +1,19 @@
+[Unit]
+Description=WeChat local utterance tone socket
+DefaultDependencies=no
+After=sysinit.target wechat-vps-panel.service
+Wants=wechat-vps-panel.service
+PartOf=wechat-vps-panel.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Socket]
+ListenStream=/run/wechat-vps-sensevoice.sock
+SocketMode=0660
+SocketGroup=wechat-vps-panel
+Accept=yes
+MaxConnections=1
+RemoveOnStop=yes
+
+[Install]
+WantedBy=multi-user.target

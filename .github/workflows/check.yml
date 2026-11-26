@@ -1,0 +1,31 @@
+name: Ubuntu installation and tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ca-certificates curl ffmpeg iproute2 util-linux python3-venv
+      - name: Install the two loopback services on the runner
+        run: |
+          sudo bash install-agent.sh
+          sudo bash install-panel.sh
+      - name: Check the initial account state
+        run: |
+          systemctl is-active --quiet wechat-vps-case
+          systemctl is-active --quiet wechat-vps-panel
+          curl --fail --silent http://127.0.0.1:28222/api/state |
+            python3 -c 'import json, sys; s=json.load(sys.stdin); assert s["logged"] is False and s["paired"] is False'
+      - name: Run the channel and call regression tests
+        env:
+          PYTHONPATH: /opt/wechat-vps-case/panel/deps
+        run: /usr/bin/python3 -B -m unittest -v test_channel test_calls
