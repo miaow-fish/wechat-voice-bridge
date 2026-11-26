@@ -64,8 +64,8 @@ class GroupTest(unittest.TestCase):
             return {"state":"accepted", "threadId":item["threadId"], "serverId":"ok"}
         self.fail(path)
 
-    def add(self, ident, text, *, peer=ROOM, sender="a", mentions=None, origin="live", direction="incoming", stamp=None):
-        self.messages[ident]={"id":ident, "threadId":peer, "type":1, "senderId":sender,
+    def add(self, ident, text, *, peer=ROOM, sender="a", kind=1, mentions=None, origin="live", direction="incoming", stamp=None):
+        self.messages[ident]={"id":ident, "threadId":peer, "type":kind, "senderId":sender,
                               "body":text, "direction":direction, "mentions":mentions}
         when=datetime.fromtimestamp(stamp or time.time(), timezone.utc).isoformat()
         event={"kind":"message.committed","createdAt":when,"data":{"threadId":peer,"messageId":ident,
@@ -126,6 +126,81 @@ class GroupTest(unittest.TestCase):
             worker.process(self.turn("quote"))
         dial.assert_not_called()
         self.assertEqual(self.sent,[{"threadId":ROOM,"text":reply}])
+
+    def test_bound_friend_is_recognized_across_renames_and_same_name_without_private_history(self):
+        with st.database() as db:
+            st.put(db,"peer","a")
+            st.put(db,"profile",{"private_context":"私聊专用设定","merge_messages":True})
+        self.add("dm","私聊原话",peer="a",sender="a")
+        with patch.object(providers,"chat",return_value="私聊回答"):
+            worker.process(self.turn("dm"))
+        st.remember_call_line("a","电话原话","电话回答")
+        now=time.time()
+        with patch.object(group_chats,"current_speaker_name",side_effect=["乙","新群昵称"]):
+            self.add("first","同名时的第一句",stamp=now)
+            self.add("other","同名时的第二句",sender="b",stamp=now+1)
+            with patch.object(providers,"chat",return_value="[[silent]]") as model:
+                worker.process(self.turn("first"))
+            wire=model.call_args.args[1]
+            self.assertIn("〔已绑定的私聊好友〕〔群成员 乙〕\n同名时的第一句\n〔群成员 乙〕\n同名时的第二句",wire[-1]["content"])
+            self.add("renamed","换名字了",mentions={"state":"known","self":True},stamp=now+10)
+            with patch.object(providers,"chat",return_value="[[silent]]") as model:
+                worker.process(self.turn("renamed"))
+        second=model.call_args.args[1]
+        self.assertEqual(wire[0],second[0])
+        self.assertIn("〔已绑定的私聊好友〕〔群成员 新群昵称 · @了你〕",second[-1]["content"])
+        self.assertIn("〔已绑定的私聊好友〕〔群成员 乙〕",second[1]["content"])
+        for secret in ("私聊原话","私聊回答","电话原话","电话回答","私聊专用设定",st.group_sender_key(ROOM,"a")):
+            self.assertNotIn(secret,str(second))
+        self.assertFalse(any(msg.get("threadId")==ROOM for msg in self.sent))
+        with st.database() as db:
+            st.put(db,"peer","b")
+        changed=st.recent_dialogue(ROOM)
+        self.assertIn("〔群成员 乙〕\n同名时的第一句\n〔已绑定的私聊好友〕〔群成员 乙〕\n同名时的第二句",changed[0]["content"])
+        self.assertNotIn("已绑定的私聊好友",changed[-1]["content"])
+        with st.database() as db:
+            st.put(db,"peer",None)
+        self.assertNotIn("已绑定的私聊好友",str(st.recent_dialogue(ROOM)))
+
+    def test_upgrade_marks_only_verified_original_senders(self):
+        with st.database() as db:
+            st.put(db,"peer","a")
+        for mid in ("valid","wrong-room","outgoing"):
+            self.add(mid,"旧群消息")
+        self.messages["wrong-room"]["threadId"]=OTHER
+        self.messages["outgoing"]["direction"]="outgoing"
+        with st.database() as db:
+            db.execute("UPDATE group_inputs SET sender_key=NULL")
+        self.lookups.clear()
+        worker.restore_group_senders()
+        worker.restore_group_senders()
+        self.assertEqual(self.lookups.count("valid"),1)
+        with st.database() as db:
+            recovered=dict(db.execute("SELECT message_id,sender_key FROM group_inputs"))
+        self.assertEqual(recovered,{"valid":st.group_sender_key(ROOM,"a"),"wrong-room":None,"outgoing":None})
+
+    def test_incoming_sticker_description_and_voice_tone_remain_with_their_sender(self):
+        with st.database() as db:
+            st.put(db,"peer","a")
+            st.put(db,"profile",{"persona":"人设测试","pinned_context":"通用测试","worldbook":"常驻测试",
+                                 "private_context":"私聊专用测试","merge_messages":True,"sticker_vision":"once"})
+        now=time.time()
+        self.add("plain","看看这个",stamp=now)
+        self.add("sticker","",sender="b",kind=47,stamp=now+1)
+        self.add("voice","",kind=34,stamp=now+2)
+        with st.database() as db:
+            db.execute("INSERT INTO voice_inputs VALUES('voice','收到啦','测试听写')")
+            db.execute("INSERT INTO voice_tones VALUES('voice','开心','tagged')")
+        with (patch.object(worker.account_stickers,"received",return_value="〔微信表情画面 · 小猫鼓掌〕"),
+              patch.object(providers,"chat",return_value="[[silent]]") as model):
+            worker.process(self.turn("plain"))
+        head,last=model.call_args.args[1]
+        self.assertEqual(head["content"].split("\n\n")[:3],["人设\n人设测试","通用指令\n通用测试","常驻背景\n常驻测试"])
+        for token in ("私聊专用测试","小猫鼓掌","开心","〔已绑定的私聊好友〕"):
+            self.assertNotIn(token,head["content"])
+        words=last["content"]
+        self.assertIn("〔群成员 乙〕\n〔微信表情画面 · 小猫鼓掌〕\n〔已绑定的私聊好友〕〔群成员 甲〕\n〔语音转写〕\n收到啦〔开心〕",words)
+        self.assertGreater(words.index("〔当前北京时间〕"),words.index("收到啦"))
 
     def test_group_repairs_display_labels_then_sends_two_voice_notes_and_real_sticker(self):
         self.add("media","随便说两句，再选个表情")
@@ -280,6 +355,7 @@ class GroupTest(unittest.TestCase):
                 db.execute("CREATE TABLE turns(id TEXT PRIMARY KEY,peer TEXT,status TEXT,kind TEXT,input TEXT,answer TEXT,phase TEXT,error TEXT)")
                 db.execute("INSERT INTO turns(id,peer,status,kind,answer) VALUES('old','friend','accepted','text','旧回复')")
                 db.execute("CREATE TABLE incoming(id TEXT PRIMARY KEY,peer TEXT,kind INTEGER,body TEXT,stamp REAL,turn TEXT)")
+                db.execute("CREATE TABLE group_inputs(message_id TEXT PRIMARY KEY,speaker TEXT,mentioned INTEGER)")
                 db.execute("INSERT INTO incoming VALUES('m','friend',1,'旧私聊',1,'old')")
             st.init()
             st.init()

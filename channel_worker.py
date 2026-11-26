@@ -57,6 +57,45 @@ def valid_pair(pair, body):
                 hmac.compare_digest(pair["hash"],hashlib.sha256(body.encode()).hexdigest()))
 
 
+def incoming_sender(msg,peer,mid):
+    sender=msg.get("senderId")
+    if (msg.get("direction")!="incoming" or msg.get("id")!=mid or msg.get("threadId")!=peer
+            or msg.get("recall") or not isinstance(sender,str) or not sender):
+        return None
+    if peer.endswith("@chatroom"):
+        return sender if sender!=peer else None
+    return sender if sender==peer else None
+
+
+def restore_group_senders():
+    """Recover missing sender keys on upgrade from the original group messages."""
+    with st.database() as db:
+        rooms=list(st.get(db,"group_routes",{}))
+    for room in rooms:
+        if not room.endswith("@chatroom"):
+            continue
+        with st.database() as db:
+            missing=db.execute("""SELECT i.id FROM incoming i JOIN group_inputs g ON g.message_id=i.id
+                WHERE g.sender_key IS NULL AND i.peer=? AND i.turn IN
+                    (SELECT id FROM turns WHERE peer=? AND scope='group' ORDER BY rowid DESC LIMIT ?)""",
+                (room,room,st.MAX_HISTORY_TURNS)).fetchall()
+        verified=[]
+        for (mid,) in missing:
+            try:
+                sender=incoming_sender(wx("/messages/"+esc(mid)),room,mid)
+            except HTTPError as exc:
+                if exc.code in (404,410):
+                    continue
+                break
+            except (OSError,ValueError):
+                break
+            if sender:
+                verified.append((st.group_sender_key(room,sender),mid))
+        if verified:
+            with st.database() as db:
+                db.executemany("UPDATE group_inputs SET sender_key=? WHERE message_id=? AND sender_key IS NULL",verified)
+
+
 def ingest(db, event):
     data = event.get("data") or {}
     if event.get("kind") != "message.committed":
@@ -91,10 +130,8 @@ def ingest(db, event):
         if err.code == 404:
             return
         raise
-    sender = msg.get("senderId")
-    if (msg.get("direction") != "incoming" or msg.get("id") != mid or msg.get("threadId") != peer or msg.get("recall")
-            or not isinstance(sender,str) or not sender
-            or (group and sender == peer) or (not group and sender != peer)):
+    sender = incoming_sender(msg,peer,mid)
+    if not sender:
         return
     kind = msg.get("type")
     body = (msg.get("body") if isinstance(msg.get("body"),str) else "").strip()
@@ -120,7 +157,9 @@ def ingest(db, event):
         return
     if kind in (3,34):
         body = ""
-    speaker = group_chats.speaker_name(peer,sender) if group else None
+    if group:
+        lookup = group_chats.current_speaker_name if sender==bound else group_chats.speaker_name
+        speaker = lookup(peer,sender)
     mentions = msg.get("mentions") or {}
     mentioned = bool(group and mentions.get("state")=="known" and mentions.get("self") is True)
     db.execute("BEGIN IMMEDIATE")
@@ -144,7 +183,8 @@ def ingest(db, event):
     db.execute("INSERT INTO incoming(id,peer,kind,body,stamp,turn) VALUES(?,?,?,?,?,?)",
                (mid,peer,kind,body[:16000],stamp,turn))
     if group:
-        db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned) VALUES(?,?,?)",(mid,speaker,mentioned))
+        db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned,sender_key) VALUES(?,?,?,?)",
+                   (mid,speaker,mentioned,st.group_sender_key(peer,sender)))
 
 
 def collect():
@@ -176,12 +216,12 @@ def collect():
             time.sleep(5)
 
 
-def input_parts(rows, settings):
+def input_parts(rows, settings, *, bound_key=None):
     parts, lines, sources = [], [], []
     pixels = 0
     for row in rows:
         body = row["body"]
-        speaker = st.speaker_line(row)
+        speaker = st.speaker_line(row,bound_key)
         if speaker:
             parts.append({"type":"text","text":speaker})
         if row["kind"] == 3:
@@ -231,8 +271,8 @@ def update(turn, *, action=False, **values):
         db.execute("UPDATE "+table+" SET "+fields+" WHERE id=?",(*values.values(),turn))
 
 
-def history(peer,current):
-    return st.recent_dialogue(peer,current)
+def history(peer,current,*,bound_key=None):
+    return st.recent_dialogue(peer,current,bound_key=bound_key)
 
 
 VOICE_REQUEST_NOTE = "这轮请用语音回复。"
@@ -240,12 +280,6 @@ VOICE_DENIAL_NOTE = "语音已就绪，用语音回刚才那句话。"
 CALL_RETRY_NOTE = "这轮没有回拨邀请，直接回消息。"
 MISSING_VOICE_NOTE = "这段会直接念给对方，只输出台词。"
 MEDIA_FORMAT_NOTE = "重新按微信动作格式写。每条语音第一行单独写 [[voice]]，下一行是台词。表情单独一行 [[sticker]]。引用写法可用行内代码。"
-
-
-def voice_note(settings, note):
-    if providers.has_audio_tags(settings):
-        return note + "\n" + spoken_reply.VOICE_INSTRUCTION
-    return note
 
 
 def chat_instructions(settings, *, group):
@@ -256,7 +290,8 @@ def chat_instructions(settings, *, group):
     lines = [scene + style]
     voice = providers.audio_route_ready(settings, "tts")
     if voice:
-        lines.append(f"每条语音用下面两行，发几条就写几组。台词只写一遍，单发语音时省去文字气泡。\n{reply_actions.VOICE}\n要念的台词")
+        audio=f"每条语音用下面两行，发几条就写几组。台词只写一遍，单发语音时省去文字气泡。\n{reply_actions.VOICE}\n要念的台词"
+        lines.append(providers.voice_instructions(settings,audio))
     lines.append(f"想发表情包就单独写一行 {reply_actions.STICKER}，随后从本号的表情名中选一张。")
     if group:
         lines.append(f"想旁听时，只回 {reply_actions.SILENT}。")
@@ -265,9 +300,9 @@ def chat_instructions(settings, *, group):
     return "\n".join(lines)
 
 
-def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None):
+def reply_messages(settings,peer,current,parts,sources,*,now=None,group=None,bound_key=None):
     system=chat_instructions(settings, group=bool(group))
-    recent=history(peer,current)
+    recent=history(peer,current,bound_key=bound_key)
     notes=[]
     if group:
         notes.append("当前群聊："+group["name"])
@@ -298,9 +333,10 @@ def allows_model_call(lines):
     return bool(re.search(r"打给我|打过来|回拨|给我.{0,8}(?:电话|打)|(?:打|来|通).{0,8}电话|来.{0,4}语音通话",words))
 
 
-def sticker_context(peer,ident,lines,assistant_text="",*,speakers=()):
-    recent = history(peer,ident)[-4:]
-    context = [("助手" if m["role"]=="assistant" else "对方")+"："+m["content"][-75:] for m in recent]
+def sticker_context(peer,ident,lines,assistant_text="",*,speakers=(),recent=None):
+    if recent is None:
+        recent=history(peer,ident)
+    context = [("助手" if m["role"]=="assistant" else "对方")+"："+m["content"][-75:] for m in recent[-4:]]
     exchange = [f"{who}：{text}" if who else text for who,text in zip(speakers,lines)] if speakers else lines
     context.append("对方这轮："+"\n".join(exchange[-3:])[-140:])
     if assistant_text:
@@ -375,14 +411,17 @@ def process(turn):
     ident, peer = turn["id"], turn["peer"]
     with st.database() as db:
         group = None
+        bound = st.get(db,"peer")
+        bound_key = None
         if turn["scope"]=="group":
             ensure_group_open(peer,ident)
             group = st.get(db,"group_routes",{}).get(peer)
             if not group: raise GroupTurnClosed()
-        elif peer != st.get(db,"peer"):
+            bound_key = st.group_sender_key(peer,bound)
+        elif peer != bound:
             raise ValueError("私聊绑定已改变")
         settings = st.profile(db)
-        rows = db.execute("""SELECT i.*,g.speaker,g.mentioned FROM incoming i
+        rows = db.execute("""SELECT i.*,g.speaker,g.mentioned,g.sender_key FROM incoming i
                              LEFT JOIN group_inputs g ON g.message_id=i.id WHERE i.turn=? ORDER BY i.rowid""",
                           (ident,)).fetchall()
         planned=db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone()
@@ -397,7 +436,7 @@ def process(turn):
             update(ident,status="silent",phase="group_mention",error=None)
             return
         update(ident,phase="read")
-        parts, lines, sources = input_parts(rows,settings)
+        parts, lines, sources = input_parts(rows,settings,bound_key=bound_key)
         # In a group “send a voice note” may have been addressed to another member.
         # Only the assistant's own decision can trigger a group send.
         kind, literal = ("text", "") if group else mode_for(lines)
@@ -418,7 +457,7 @@ def process(turn):
             update(ident,phase="model")
             vision = any(p["type"] == "image_url" for p in parts)
             ensure_group_open(peer,ident)
-            messages=reply_messages(settings,peer,ident,parts,sources,group=group)
+            messages=reply_messages(settings,peer,ident,parts,sources,group=group,bound_key=bound_key)
 
             def draft(note=None):
                 request = conversation_prompt.with_chat_note(messages, note) if note else messages
@@ -434,13 +473,13 @@ def process(turn):
                     reply_actions.check_media_format(result, split=split)
                 return result
 
-            answer = draft(voice_note(settings,VOICE_REQUEST_NOTE) if kind=="voice" else None)
+            answer = draft(VOICE_REQUEST_NOTE if kind=="voice" else None)
             ensure_group_open(peer,ident)
             if group and answer.strip() in (reply_actions.SILENT,reply_actions.CALL):
                 update(ident,status="silent",phase="group_decision",error=None)
                 return
             if kind=="voice" and VOICE_DENIAL.search(answer):
-                answer=draft(voice_note(settings,VOICE_DENIAL_NOTE))
+                answer=draft(VOICE_DENIAL_NOTE)
                 if VOICE_DENIAL.search(answer):
                     raise ValueError("回复与当前可用的微信语音功能矛盾，正在重新生成")
             plan=reply_actions.parse(answer)
@@ -471,7 +510,7 @@ def process(turn):
                     if action=="voice" and settings["tts"]=="off":
                         raise ValueError("私聊配置已关闭语音合成")
                     if action=="voice" and not value:
-                        value=draft(voice_note(settings,MISSING_VOICE_NOTE))
+                        value=draft(MISSING_VOICE_NOTE)
                         if value.strip()==reply_actions.SILENT or reply_actions.parse(value) or VOICE_DENIAL.search(value):
                             raise ValueError("语音台词仍未生成")
                     resolved.append((action,value))
@@ -480,7 +519,8 @@ def process(turn):
                 hint=""
                 if any(a=="sticker" for a,_ in resolved):
                     spoken = " ".join(v for a,v in resolved if a!="sticker")
-                    hint = sticker_context(peer,ident,lines,spoken,speakers=[r["speaker"] for r in rows] if group else ())
+                    speakers=[st.speaker_line(r,bound_key) for r in rows] if group else ()
+                    hint = sticker_context(peer,ident,lines,spoken,speakers=speakers,recent=messages[1:-1])
                 save_plan(ident,lines,resolved,hint)
                 deliver_plan(ident,peer,settings)
                 return

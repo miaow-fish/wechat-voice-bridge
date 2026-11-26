@@ -140,6 +140,7 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
         media.event(calls.pcm_frame(2,1,struct.pack("<h",1900)*320*12+bytes(640*46)))
         first_played=asyncio.Event()
         async def stream(client,cfg,text):
+            self.assertEqual(text,"[whispers] 听见了。")
             yield b"\x01\x00"*320
             await first_played.wait()
             yield b"\x02\x00"*320
@@ -148,7 +149,7 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
                 if calls.read_frame(value)[2][0]==1: first_played.set()
                 else: ctl.event({"type":"call.state","call":{"callId":"ours","state":"ended"}})
         media.on_send=sent
-        with patch.object(providers,"recognize_pcm",return_value="你好呀"),patch.object(providers,"chat",return_value="听见了。"),patch.object(providers,"stream_call_pcm",new=stream),patch.object(providers,"synthesize_pcm",side_effect=AssertionError("Buffered whole reply")):
+        with patch.object(providers,"has_audio_tags",return_value=True),patch.object(providers,"recognize_pcm",return_value="你好呀"),patch.object(providers,"chat",return_value="[whispers] 听见了。"),patch.object(providers,"stream_call_pcm",new=stream),patch.object(providers,"synthesize_pcm",side_effect=AssertionError("Buffered whole reply")):
             await asyncio.wait_for(calls.conversation(signal,media,ready,st.DEFAULT|{"_tts_client":object()},signal.flag),2)
         self.assertTrue(first_played.is_set())
     async def check_claim(self,mode,version=2):
@@ -228,7 +229,7 @@ class DirectCallTests(unittest.IsolatedAsyncioTestCase):
                 sock.event({"type":"call.state","call":{"callId":"ours","state":"ended","revision":6}})
         media.on_send=got_output
         tone=struct.pack("<h",1200)*320
-        with patch.object(providers,"recognize_pcm",return_value="测试甲") as transcribe,patch.object(providers,"chat",return_value="听清了") as chat,patch.object(providers,"synthesize_pcm",return_value=tone) as tts,patch("pcm_audio.subprocess.run",side_effect=AssertionError("Unexpected transcode")):
+        with patch.object(providers,"recognize_pcm",return_value="测试甲") as transcribe,patch.object(providers,"chat",return_value="[sighs] 听清了") as chat,patch.object(providers,"synthesize_pcm",return_value=tone) as tts,patch("pcm_audio.subprocess.run",side_effect=AssertionError("Unexpected transcode")):
             await asyncio.wait_for(calls.conversation(signal,media,{"sendTrack":track,"receiveTracks":[receive]},st.DEFAULT,flag),2)
         self.assertEqual(transcribe.call_count,1)
         self.assertEqual(transcribe.call_args.args[1],samples[:640*(10+round(calls.END_PAUSE/.02))])

@@ -33,6 +33,10 @@
 
 「外接记忆」只登记地址，本版尚未执行外部记忆读写。陌生表情首次识图可以单独开启，已认出的同一张图会使用缓存。表情素材来自各自微信号已添加的表情包与收藏。
 
+群里的身份标记按当前绑定账号匹配。旧版记录能在本机微信核对原始发件人时也会补上，查不到账号的发言保留群昵称。身份只参与本群模型输入，私聊与电话记录留在好友会话。
+
+同一场景在设置不变时复用相同的提示词开头，依次放人设、通用指令、常驻世界书和场景内置指令。私聊与电话的专用指令接在通用指令后。后面依次是历史、本轮消息及其附注、北京时间。语音的语气和表情识别结果随对应消息进入当轮。可用的朗读标签随语音模型确定，同一场景只提示一次。
+
 ## 可选的本机语气识别
 
 先验通听写和电话。需要对一句话附加语气标签时，可以在有余量的 VPS 上安装 SenseVoiceSmall，模型和依赖在安装时单独下载。默认由 socket 按需启动。
@@ -79,7 +83,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:28222/api/state
 
 ~~~sh
 git fetch origin --tags
-git switch --detach v0.2.6
+git switch --detach v0.2.7
 panel=/opt/wechat-vps-case/panel
 sudo tar -C "$panel" --exclude=deps --exclude=__pycache__ -czf "/root/wechat-panel-code-$(date +%Y%m%d-%H%M%S).tar.gz" .
 sudo systemctl stop wechat-vps-panel

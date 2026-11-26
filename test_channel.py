@@ -46,14 +46,15 @@ class ChannelTest(unittest.TestCase):
                     self.assertIn("只回标点或表情包",texts[title])
                     self.assertEqual(texts[title].count(reply_actions.STICKER),1)
                     self.assertEqual(texts[title].count(reply_actions.VOICE),int(enabled))
-                    self.assertNotIn("[laughs]",texts[title])
+                    self.assertEqual("[laughs]" in texts[title],enabled)
             self.assertEqual(texts["实时语音电话"],worker.call_channel.call_messages(cfg,[],"喂")[0]["content"])
             self.assertEqual("想分气泡就换行" in texts["微信私聊"],enabled)
             self.assertEqual(reply_actions.CALL in texts["微信私聊"],enabled)
             self.assertNotIn(reply_actions.CALL,texts["微信群聊"])
             self.assertIn(reply_actions.SILENT,texts["微信群聊"])
             self.assertNotIn(reply_actions.SILENT,texts["微信私聊"])
-            self.assertEqual("[laughs]" in texts["私聊请求语音"],enabled)
+            self.assertEqual("[laughs]" in texts["实时语音电话"],enabled)
+            self.assertNotIn("[laughs]",texts["私聊请求语音"])
             self.assertEqual([e["title"] for e in entries if e["kind"]=="scene"],["微信私聊","微信群聊","实时语音电话"])
 
     def test_chat_only_explains_audio_actions_with_ready_routes(self):
@@ -125,7 +126,8 @@ class ChannelTest(unittest.TestCase):
             self.assertEqual(worldbooks.sections(cfg,[],"山茶"),("底色","一二三四\n\n甲乙"))
 
     def test_stable_settings_history_current_parts_and_beijing_clock(self):
-        cfg=st.DEFAULT|{"persona":"纸鹤","worldbook":"画室","voice":"fixture","tts_model":"eleven_v4"}
+        providers.save({"id":"elevenlabs","kind":"elevenlabs","name":"测试合成","key":"fixture"})
+        cfg=st.DEFAULT|{"persona":"纸鹤","pinned_context":"平常说话","private_context":"私聊设定","worldbook":"画室","voice":"fixture","tts_model":"eleven_v4"}
         recent=[{"role":"user","content":"上回留的什么色？"},{"role":"assistant","content":"淡青"}]
         first=[{"type":"text","text":"开灯了吗"},{"type":"text","text":"我刚进门"}]
         mixed=[ds.image_part(ds.chart(),"image/png"),{"type":"text","text":"〔语音转写〕\n这次呢〔开心〕"}]
@@ -136,7 +138,8 @@ class ChannelTest(unittest.TestCase):
             voice=worker.reply_messages(cfg,"peer",None,mixed,["微信图片","微信语音条（已转写）"],now=after)
             edited=worker.reply_messages(cfg|{"persona":"新的人设"},"peer",None,first,["微信文字"],now=after)
         self.assertEqual(plain[:-1],voice[:-1])
-        self.assertNotIn("[laughs]",plain[0]["content"])
+        self.assertEqual(plain[0]["content"].split("\n\n")[:4],["人设\n纸鹤","通用指令\n平常说话","私聊与电话专用指令\n私聊设定","常驻背景\n画室"])
+        self.assertIn("[laughs]",plain[0]["content"])
         self.assertNotIn("[laughs]",str(voice[-1]["content"]))
         self.assertNotEqual(edited[0],plain[0])
         self.assertEqual(plain[1:-1],recent)
@@ -202,6 +205,7 @@ class ChannelTest(unittest.TestCase):
         self.assertNotIn("[[",self.turns()[0]["answer"])
 
     def test_bare_voice_marker_uses_context_to_compose_original_words(self):
+        providers.save({"id":"elevenlabs","kind":"elevenlabs","name":"测试合成","key":"fixture"})
         self.bind()
         with st.database() as db: st.put(db,"profile",{"tts_model":"eleven_v4","voice":"fixture"})
         st.remember_call_line("peer","我做的蛋糕塌了","那勺子总还能用吧")
@@ -217,7 +221,8 @@ class ChannelTest(unittest.TestCase):
         self.assertIn(worker.VOICE_REQUEST_NOTE,first)
         self.assertNotIn(worker.VOICE_REQUEST_NOTE,second)
         self.assertIn(worker.MISSING_VOICE_NOTE,second)
-        self.assertEqual(second.count(spoken_reply.VOICE_INSTRUCTION),1)
+        self.assertNotIn(spoken_reply.VOICE_INSTRUCTION,second)
+        self.assertEqual(refinement[0]["content"].count(spoken_reply.VOICE_INSTRUCTION),1)
         self.assertEqual(first_clock,second_clock)
         self.assertEqual(self.turns()[0]["input"],"发个语音")
         self.assertIn("蛋糕",context)
@@ -467,6 +472,7 @@ class ChannelTest(unittest.TestCase):
 
     def test_voice_direction_reaches_one_native_note_and_stays_out_of_dialogue(self):
         self.bind()
+        providers.save({"id":"elevenlabs","kind":"elevenlabs","name":"测试合成","key":"fixture"})
         with st.database() as db:
             st.put(db,"profile",{"tts_model":"eleven_v4","voice":"fixture"})
         self.incoming("request","可以给我发条语音听听吗？")
@@ -479,7 +485,8 @@ class ChannelTest(unittest.TestCase):
             worker.process(self.turns()[0])
         self.assertEqual(submit.call_args_list[0],submit.call_args_list[1])
         self.assertEqual(model.call_count,1)
-        self.assertIn("[laughs]",model.call_args.args[1][-1]["content"])
+        self.assertIn("[laughs]",model.call_args.args[1][0]["content"])
+        self.assertNotIn("[laughs]",model.call_args.args[1][-1]["content"])
         self.assertEqual(tts.call_args.args[1],"[laughs] 最后一块蛋糕给你。")
         self.assertEqual(tts.call_count,1)
         result=self.turns()[0]

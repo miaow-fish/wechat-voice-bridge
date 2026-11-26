@@ -16,6 +16,7 @@ import conversation_prompt
 import pcm_audio
 import providers
 import sensevoice_local
+import spoken_reply
 import voice_iat
 from websockets.exceptions import ConnectionClosed
 from wechat_case import HOST, SCOPE, TOKEN, esc, wx
@@ -341,7 +342,8 @@ CALL_INSTRUCTIONS = (
 
 def call_messages(cfg, history, current, *, now=None):
     limit=cfg.get("history_turns",st.DEFAULT["history_turns"])
-    return conversation_prompt.build(cfg,CALL_INSTRUCTIONS,recent_call_turns(history,limit),current,now=now,private=True)
+    instructions=providers.voice_instructions(cfg,CALL_INSTRUCTIONS)
+    return conversation_prompt.build(cfg,instructions,recent_call_turns(history,limit),current,now=now,private=True)
 
 
 async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=True,history=None):
@@ -525,11 +527,14 @@ async def conversation(signal,media,ready,cfg,flag,greeting=None,*,own_control=T
                 draft=await asyncio.to_thread(providers.chat,cfg,call_messages(cfg,history,msg["content"]))
                 answer,finish=end_decision(draft)
                 if turn!=epoch or not answer: continue
+                spoken=spoken_reply.parse(answer)
+                answer=spoken.words
+                delivery=spoken.delivery if providers.has_audio_tags(cfg) else answer
                 written=time.monotonic()
                 if cfg.get("_tts_client"):
-                    out=providers.stream_call_pcm(cfg["_tts_client"],cfg,answer)
+                    out=providers.stream_call_pcm(cfg["_tts_client"],cfg,delivery)
                 else:
-                    out=await asyncio.to_thread(providers.synthesize_pcm,cfg,answer)
+                    out=await asyncio.to_thread(providers.synthesize_pcm,cfg,delivery)
             except (OSError,ValueError,TimeoutError,KeyError,IndexError,ConnectionClosed):
                 change(stage="通话中，正在等你继续说")
                 continue

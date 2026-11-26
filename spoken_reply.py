@@ -7,7 +7,7 @@ DIRECTIONS = {"laughs", "sighs", "whispers", "curious", "mischievously"}
 TAG_MODELS = {"eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"}
 BRACKETS = re.compile(r"\[([^\[\]\n]{1,80})\]")
 VOICE_INSTRUCTION = (
-    "台词可加 [laughs]、[sighs]、[whispers]、[curious] 或 [mischievously]，最多两处。"
+    "只在语音台词里按需加 [laughs]、[sighs]、[whispers]、[curious] 或 [mischievously]，最多两处。"
 )
 
 

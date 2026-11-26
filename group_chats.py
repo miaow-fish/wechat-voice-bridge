@@ -1,5 +1,4 @@
 """Explicit group subscriptions for the logged-in WeChat account."""
-import hashlib
 from functools import lru_cache
 import time
 from urllib.error import HTTPError, URLError
@@ -76,8 +75,7 @@ def configure(peer, mode):
     return {"message": "群聊设置已保存"}
 
 
-@lru_cache(maxsize=512)
-def speaker_name(peer, sender):
+def current_speaker_name(peer, sender):
     try:
         reply = wx("/groups/" + esc(peer) + "/members/" + esc(sender))
         member = reply.get("member") or {}
@@ -88,4 +86,7 @@ def speaker_name(peer, sender):
                     return " ".join(name.split())[:60]
     except (HTTPError, URLError, TimeoutError):
         pass
-    return "群友 " + hashlib.sha256((peer+"\n"+sender).encode()).hexdigest()[:6]
+    return "群友 " + st.group_sender_key(peer,sender)[:6]
+
+
+speaker_name = lru_cache(maxsize=512)(current_speaker_name)

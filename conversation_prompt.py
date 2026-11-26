@@ -21,12 +21,12 @@ def build(cfg, instructions, history, current, notes=(), *, now=None, private=Fa
     settings = []
     if cfg.get("persona"):
         settings.append("人设\n" + cfg["persona"])
-    if fixed:
-        settings.append("常驻背景\n" + fixed)
     if cfg.get("pinned_context"):
         settings.append("通用指令\n" + cfg["pinned_context"])
     if private and cfg.get("private_context"):
         settings.append("私聊与电话专用指令\n" + cfg["private_context"])
+    if fixed:
+        settings.append("常驻背景\n" + fixed)
     settings.append(instructions)
 
     receipts = [msg["wechat_receipt"] for msg in history if msg.get("wechat_receipt")]

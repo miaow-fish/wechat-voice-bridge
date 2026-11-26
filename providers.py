@@ -250,6 +250,12 @@ def has_audio_tags(cfg):
             and cfg.get("tts_model") in spoken_reply.TAG_MODELS and service(cfg["tts"])["kind"] == "elevenlabs")
 
 
+def voice_instructions(cfg, instructions):
+    if has_audio_tags(cfg):
+        return instructions + "\n" + spoken_reply.VOICE_INSTRUCTION
+    return instructions
+
+
 def eleven_pcm(s, cfg, text, rate):
     if not cfg["voice"]:
         raise ValueError("请填写语音合成的音色 ID")

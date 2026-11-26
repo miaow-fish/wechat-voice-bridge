@@ -1,5 +1,6 @@
 """Per-instance control settings and durable WeChat delivery records."""
 from contextlib import contextmanager
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -45,7 +46,7 @@ def init():
                 body TEXT NOT NULL, stamp REAL NOT NULL, turn TEXT);
             CREATE TABLE IF NOT EXISTS group_inputs(
                 message_id TEXT PRIMARY KEY REFERENCES incoming(id),
-                speaker TEXT NOT NULL, mentioned INTEGER NOT NULL DEFAULT 0);
+                speaker TEXT NOT NULL, mentioned INTEGER NOT NULL DEFAULT 0, sender_key TEXT);
             CREATE TABLE IF NOT EXISTS turns(
                 id TEXT PRIMARY KEY, peer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new',
                 kind TEXT, input TEXT, answer TEXT, wire TEXT, send_id TEXT, receipt TEXT,
@@ -71,6 +72,8 @@ def init():
         db.execute("BEGIN IMMEDIATE")
         if "scope" not in {r["name"] for r in db.execute("PRAGMA table_info(turns)")}:
             db.execute("ALTER TABLE turns ADD COLUMN scope TEXT NOT NULL DEFAULT 'direct'")
+        if "sender_key" not in {r["name"] for r in db.execute("PRAGMA table_info(group_inputs)")}:
+            db.execute("ALTER TABLE group_inputs ADD COLUMN sender_key TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS turns_pending ON turns(scope,peer,status)")
         db.execute("CREATE INDEX IF NOT EXISTS incoming_turn ON incoming(turn)")
 
@@ -84,10 +87,16 @@ def put(db, key, value):
     db.execute("INSERT OR REPLACE INTO config VALUES(?,?)", (key, json.dumps(value, ensure_ascii=False)))
 
 
-def speaker_line(row):
+def group_sender_key(room, sender):
+    """Match a WeChat account within one group without storing its raw ID there."""
+    return sha256((room+"\n"+sender).encode()).hexdigest() if sender else ""
+
+
+def speaker_line(row, bound_key=None):
     if "speaker" not in row.keys() or not row["speaker"]:
         return ""
-    return "〔群成员 " + row["speaker"] + (" · @了你" if row["mentioned"] else "") + "〕"
+    identity = "〔已绑定的私聊好友〕" if bound_key and row["sender_key"] == bound_key else ""
+    return identity + "〔群成员 " + row["speaker"] + (" · @了你" if row["mentioned"] else "") + "〕"
 
 
 def merge_window(settings):
@@ -140,25 +149,28 @@ def delivered_reply(db, turn, *, for_call):
     return "\n".join(words), "、".join(receipts)
 
 
-def recent_dialogue(peer,before=None,*,for_call=False):
+def recent_dialogue(peer,before=None,*,for_call=False,bound_key=None):
     """Keep each conversation's speakers, including group turns the assistant sat out."""
     import time
     with database() as db:
         limit=get(db,"profile",{}).get("history_turns",DEFAULT["history_turns"])
         if not limit: return []
+        group = peer.endswith("@chatroom")
+        if group and bound_key is None:
+            bound_key=group_sender_key(peer,get(db,"peer"))
         until=time.time()
         if before:
             row=db.execute("SELECT MIN(stamp) FROM incoming WHERE turn=?",(before,)).fetchone()
             if row[0] is not None: until=row[0]
         rows=db.execute("""SELECT t.id,t.input,t.answer,t.kind,t.scope,t.status,MAX(i.stamp) AS stamp
             FROM turns t JOIN incoming i ON i.turn=t.id
-            WHERE t.peer=? AND (t.status='accepted' OR (t.scope='group' AND t.status='silent')
+            WHERE t.peer=? AND t.scope=? AND (t.status='accepted' OR (t.scope='group' AND t.status='silent')
                 OR (t.status='failed' AND EXISTS (SELECT 1 FROM turn_actions a WHERE a.turn_id=t.id AND a.status='accepted')))
                 AND (? IS NULL OR t.rowid < (SELECT rowid FROM turns WHERE id=?))
-            GROUP BY t.id ORDER BY t.rowid DESC LIMIT ?""",(peer,before,before,limit)).fetchall()
+            GROUP BY t.id ORDER BY t.rowid DESC LIMIT ?""",(peer,"group" if group else "direct",before,before,limit)).fetchall()
         turns=[]
         for row in rows:
-            inputs=db.execute("""SELECT i.kind,i.body,g.speaker,g.mentioned,v.transcript,t.tone FROM incoming i
+            inputs=db.execute("""SELECT i.kind,i.body,g.speaker,g.mentioned,g.sender_key,v.transcript,t.tone FROM incoming i
                 LEFT JOIN group_inputs g ON g.message_id=i.id
                 LEFT JOIN voice_inputs v ON v.message_id=i.id LEFT JOIN voice_tones t ON t.message_id=i.id
                 WHERE i.turn=? ORDER BY i.rowid""",(row["id"],)).fetchall()
@@ -167,7 +179,7 @@ def recent_dialogue(peer,before=None,*,for_call=False):
             else:
                 messages=[]
                 for x in inputs:
-                    prefix=speaker_line(x)
+                    prefix=speaker_line(x,bound_key)
                     if prefix: messages.append(prefix)
                     if x["kind"]==34 and not x["transcript"]:
                         messages.append("〔微信语音〕")
@@ -178,8 +190,9 @@ def recent_dialogue(peer,before=None,*,for_call=False):
                 words="\n".join(messages)
             reply,receipt=delivered_reply(db,row,for_call=for_call)
             turns.append((row["stamp"],words,reply,receipt))
-        for stamp,words,reply in db.execute("SELECT stamp,words,reply FROM call_lines WHERE peer=? AND stamp<=? ORDER BY stamp DESC,id DESC LIMIT ?",(peer,until,limit)):
-            turns.append((stamp,"〔微信电话〕\n"+words,reply,""))
+        if not group:
+            for stamp,words,reply in db.execute("SELECT stamp,words,reply FROM call_lines WHERE peer=? AND stamp<=? ORDER BY stamp DESC,id DESC LIMIT ?",(peer,until,limit)):
+                turns.append((stamp,"〔微信电话〕\n"+words,reply,""))
     result=[]
     for _,words,reply,receipt in sorted(turns,key=lambda t:t[0])[-limit:]:
         message={"role":"user","content":words[:2000]}

@@ -170,14 +170,14 @@ def builtin_prompts():
     scenes = [
         ("微信私聊", "与绑定好友聊天时使用。", channel_worker.chat_instructions(cfg, group=False)),
         ("微信群聊", "在已启用的群里判断是否接话时使用。", channel_worker.chat_instructions(cfg, group=True)),
-        ("实时语音电话", "电话接通后使用。", call_channel.CALL_INSTRUCTIONS),
+        ("实时语音电话", "电话接通后使用。", providers.voice_instructions(cfg,call_channel.CALL_INSTRUCTIONS)),
     ]
     tools = [
         ("媒体格式重写", "把记录标签写成输出，或把动作和台词挤在同一行时，重新生成一次。", channel_worker.MEDIA_FORMAT_NOTE),
-        ("私聊请求语音", "对方请助手发语音时使用。", channel_worker.voice_note(cfg,channel_worker.VOICE_REQUEST_NOTE)),
-        ("语音初稿否认可用功能", "助手误说发不了语音时重新生成。", channel_worker.voice_note(cfg,channel_worker.VOICE_DENIAL_NOTE)),
+        ("私聊请求语音", "对方请助手发语音时使用。", channel_worker.VOICE_REQUEST_NOTE),
+        ("语音初稿否认可用功能", "助手误说发不了语音时重新生成。", channel_worker.VOICE_DENIAL_NOTE),
         ("未受邀拨号", "模型输出拨号代号，当前私聊消息未通过回拨条件时，带这句重新生成。", channel_worker.CALL_RETRY_NOTE),
-        ("补写语音台词", "选择了语音却漏写台词时使用。", channel_worker.voice_note(cfg,channel_worker.MISSING_VOICE_NOTE)),
+        ("补写语音台词", "选择了语音却漏写台词时使用。", channel_worker.MISSING_VOICE_NOTE),
         ("识别陌生表情", "表情名与已有识别结果都未命中时交给识图模型。" + sticker_note, account_stickers.DESCRIPTION_INSTRUCTIONS),
         ("按语境挑表情", "确定要发，再提供本号候选名称和最近对话。唯一匹配可直接使用。", account_stickers.SELECTION_INSTRUCTIONS),
         ("外部模型听语气", "仅在使用外部音频模型分析语气时发送。" + tone_note, providers.TONE_INSTRUCTIONS),
@@ -344,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     st.init()
     providers.initialize()
-    for run in (channel_worker.collect, channel_worker.deliver):
+    for run in (channel_worker.collect, channel_worker.deliver, channel_worker.restore_group_senders):
         Thread(target=run,daemon=True).start()
     Thread(target=channel_worker.deliver,args=("group",),daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1",28222),Handler).serve_forever()
