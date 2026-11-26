@@ -9,6 +9,9 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 CLOCK_HEADER = "\n\n〔当前北京时间〕"
 NOTE_HEADER = "\n\n〔通道附注〕\n"
 
+def builtin_system(instructions):
+    return "文末时间和通道附注由系统提供。\n\n" + instructions
+
 
 def build(cfg, instructions, history, current, notes=(), *, now=None, private=False):
     words = current if isinstance(current, str) else "\n".join(
@@ -27,8 +30,7 @@ def build(cfg, instructions, history, current, notes=(), *, now=None, private=Fa
         settings.append("通用指令\n" + cfg["pinned_context"])
     if private and cfg.get("private_context"):
         settings.append("私聊与电话专用指令\n" + cfg["private_context"])
-    settings.append("文末时间和通道附注由系统提供。")
-    settings.append(instructions)
+    settings.append(builtin_system(instructions))
 
     info = (["本轮背景设定\n" + topical] if topical else []) + list(notes)
     suffix = [NOTE_HEADER + "\n".join(info)] if info else []

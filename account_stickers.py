@@ -18,6 +18,8 @@ from wechat_case import cli, esc, HOST, HTTP, SCOPE, TOKEN, wx, media, image_typ
 
 PENDING = ("queued","running","pending")
 UNKNOWN = "〔收到表情包〕"
+DESCRIPTION_INSTRUCTIONS = "为这张微信表情写一条简短的中文画面说明，描述主体、动作、可读文字和明显的表情。作者给它的名字未知。"
+SELECTION_INSTRUCTIONS = "从本账号的微信表情中选一个符合对方想表达的感觉的。用表情名和整包名作判断。回复一个已有选项的整数编号。"
 _recognizing = Lock()
 CAP = 64*1024*1024
 SEND = re.compile(r"^(?:(?:麻烦|请|你|可以|能不能|能|给我|帮我|再|也)\s*){0,8}(?:发给我|发|来|回)(?:一?[张个款只]|一下|下)?(?:微信)?(.{0,32}?)(?:表情包|表情贴纸|贴纸|贴图|表情)(?:给我)?(?:看看|试试)?[吧呀嘛吗呗啦呢哈啊～~！!。？?\s]*$")
@@ -174,7 +176,7 @@ def received(message_id,cfg):
                 if known: st.put(db,"sticker_seen:"+digest,known)
         if known or not allow_vision: return known or UNKNOWN
         pic=ds.image_part(data,image_type(data))
-        result=providers.chat(cfg,[{"role":"system","content":"为这张微信表情写一条简短的中文画面说明，描述主体、动作、可读文字和明显的表情。作者给它的名字未知。"},
+        result=providers.chat(cfg,[{"role":"system","content":DESCRIPTION_INSTRUCTIONS},
                                    {"role":"user","content":[pic]}],vision=True)
         description=" ".join(result.split())[:360]
         if not description: return UNKNOWN
@@ -192,7 +194,7 @@ def descriptive_choice(wanted,items,settings):
         return descriptive_choice(wanted,finalists,settings)
     options=items
     data={"想表达的感觉":wanted,"可选表情":[[n,row["group"],row["label"]] for n,row in enumerate(options,1)]}
-    context=[{"role":"system","content":"从本账号的微信表情中选一个符合对方想表达的感觉的。用表情名和整包名作判断。回复一个已有选项的整数编号。"},
+    context=[{"role":"system","content":SELECTION_INSTRUCTIONS},
              {"role":"user","content":json.dumps(data,ensure_ascii=False)}]
     reply=providers.chat(settings,context)
     if not re.fullmatch(r"[1-9][0-9]{0,2}",reply.strip()):

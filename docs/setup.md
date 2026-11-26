@@ -27,9 +27,9 @@
 
 ## 人设、世界书和上下文
 
-在「对话上下文」里填写每次带入的历史轮数，点「保存轮数」。例如设为 2 时，每次取本会话最近两轮历史，再加当前发言。合并处理的几条微信算一轮。历史不足时带入已有轮数，0 表示跳过历史。默认 30 轮，上限 100 轮。群聊中的旁听轮也计入本群历史。
+在「人设与世界书 → 对话上下文」填写每次带入的历史轮数，点「保存轮数」。例如设为 2 时，每次取本会话最近两轮历史，再加当前发言。合并处理的几条微信算一轮。历史不足时带入已有轮数，0 表示跳过历史。默认 30 轮，上限 100 轮。群聊中的旁听轮也计入本群历史。
 
-「人设与世界书」管理人设、提示词和背景资料。「提示词（Prompt）」里可以填写通用指令和私聊与电话专用指令。世界书可导入 TXT、Markdown、DOCX 或酒馆世界书 JSON，关键词条目由当轮文字激活，常驻条目随每轮使用。
+「提示词（Prompt）」里可以填写通用指令和私聊与电话专用指令。「查看内置提示词原文」按已保存的功能设置列出各场景使用的指令和触发条件。世界书可导入 TXT、Markdown、DOCX 或酒馆世界书 JSON，关键词条目由当轮文字激活，常驻条目随每轮使用。
 
 「外接记忆」只登记地址，本版尚未执行外部记忆读写。陌生表情首次识图可以单独开启，已认出的同一张图会使用缓存。表情素材来自各自微信号已添加的表情包与收藏。
 
@@ -79,11 +79,11 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:28222/api/state
 
 ~~~sh
 git fetch origin --tags
-git switch --detach v0.2.3
+git switch --detach v0.2.4
 panel=/opt/wechat-vps-case/panel
 sudo tar -C "$panel" --exclude=deps --exclude=__pycache__ -czf "/root/wechat-panel-code-$(date +%Y%m%d-%H%M%S).tar.gz" .
 sudo systemctl stop wechat-vps-panel
-sudo install -m 0644 call_channel.py channel_state.py channel_worker.py conversation_prompt.py group_chats.py panel.py reply_actions.py index.html panel.js panel.css "$panel/"
+sudo install -m 0644 account_stickers.py call_channel.py channel_state.py channel_worker.py conversation_prompt.py group_chats.py panel.py providers.py reply_actions.py index.html panel.js panel.css "$panel/"
 sudo systemctl start wechat-vps-panel
 sudo systemctl is-active wechat-vps-panel wechat-vps-case
 ~~~

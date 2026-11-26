@@ -8,23 +8,26 @@ let selectedRole=sessionStorage.getItem("wx-role")||"asr";
 if(!Object.hasOwn(fields,selectedRole))selectedRole="asr";
 const pages={
   connect:["微信连接","登录助手微信，选择好友和群聊。"],
-  context:["对话上下文","每次回复前，从当前会话带上最近几轮聊天。合并处理的几条微信算一轮。"],
   routes:["模型与声音","为每种用途选择实际处理它的服务。"],
   providers:["服务商","管理接口地址、凭据和可用模型。"],
-  profiles:["人设与世界书","设置助手的人设、提示词和背景资料。"],
+  profiles:["人设与世界书","设置助手的人设、提示词、世界书和历史对话轮数。"],
   memory:["外接记忆","管理微信通道与独立记忆系统的连接配置。"],
   stickers:["微信表情","管理助手能发出的表情，以及收到表情时的识别方式。"],
   activity:["通话与记录","发起微信电话，查看语音和消息的投递情况。"]
 };
 function showPage(){
-  const page=Object.hasOwn(pages,location.hash.slice(1))?location.hash.slice(1):"connect";
+  const hash=location.hash.slice(1);
+  const profileAnchor=hash==="context" || hash==="builtin-prompts";
+  const page=profileAnchor?"profiles":Object.hasOwn(pages,hash)?hash:"connect";
   for(const section of document.querySelectorAll(".view"))section.hidden=section.id!==page;
   for(const link of document.querySelectorAll("#sections a")){
     if(link.hash==="#"+page)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current");
   }
   el("pageTitle").textContent=pages[page][0];el("pageDesc").textContent=pages[page][1];
   document.title=pages[page][0]+" · 微信助手";document.querySelector(".rail").classList.remove("menu-open");
-  el("menuButton").setAttribute("aria-expanded","false");window.scrollTo(0,0);
+  el("menuButton").setAttribute("aria-expanded","false");
+  if(hash==="builtin-prompts")el(hash).open=true;
+  if(profileAnchor)el(hash).scrollIntoView();else window.scrollTo(0,0);
   if(page==="connect" && live?.group_account)startGroupsOnce();
 }
 el("menuButton").onclick=()=>el("menuButton").setAttribute("aria-expanded",String(document.querySelector(".rail").classList.toggle("menu-open")));
@@ -124,7 +127,7 @@ mergeSwitch.addEventListener("change", syncMergeControls);
 function capture(){
   if(!cfg)return;
   const f=el("settings");
-  for (const n of f.elements) {
+  for (const n of f.querySelectorAll("[name]")) {
     if (!n.name || !Object.hasOwn(cfg, n.name)) continue;
     if (n.type === "checkbox") cfg[n.name] = n.checked;
     else if (n.type === "number") cfg[n.name] = n.value === "" ? null : n.valueAsNumber;
@@ -135,14 +138,30 @@ function changedSettings(){
   capture();
   return Object.fromEntries(Object.entries(cfg||{}).filter(([k,v])=>v!==baseline?.[k]));
 }
-async function persist(section){
+async function persist(section,controls){
   const changes=changedSettings(), patch={};
-  const names=new Set(Array.from(section.querySelectorAll("[name]"),n=>n.name));
+  const names=new Set(controls.map(n=>n.name));
   if(section.id==="routes")for(const field of [...Object.values(fields).flat(),"voice"])names.add(field);
   for(const name of names)if(Object.hasOwn(changes,name))patch[name]=changes[name];
   if(Object.keys(patch).length)await api("settings",patch);
   await refresh(true);
 }
+let promptRequest=0;
+async function loadBuiltinPrompts(){
+  if(!el("builtin-prompts").open)return;
+  const request=++promptRequest, list=el("promptList");
+  try{
+    const entries=await api("builtin-prompts");
+    if(request!==promptRequest)return;
+    const sections=entries.map(entry=>{
+      const section=node("section");
+      section.append(node("h3",entry.title),node("p",entry.when),node("pre",entry.text));
+      return section;
+    });
+    list.replaceChildren(...sections);
+  }catch(e){if(request===promptRequest)list.textContent=e.message;}
+}
+el("builtin-prompts").ontoggle=loadBuiltinPrompts;
 function roleService(role,s){
   if(!s)return "";
   if(s.kind==="deepseek"&&role==="asr")return s.name+" 语音转写工具（整段录音）";
@@ -268,7 +287,9 @@ function applyState(s,force=false,discard=[]){
   baseline={...s.settings};cfg={...baseline,...changes};
   const stamp=JSON.stringify([s.providers,s.library,s.local_tone_available]);
   if(force||updated||stamp!==controlStamp){
-    for(const name of ["name","memory_url","sticker_vision","pinned_context","private_context","history_turns"])el("settings").elements[name].value=cfg[name];
+    for(const name of ["name","memory_url","sticker_vision","pinned_context","private_context"])el("settings").elements[name].value=cfg[name];
+    el("historyTurns").value=cfg.history_turns;
+    loadBuiltinPrompts();
     mergeSwitch.checked = cfg.merge_messages;
     el("splitBubbles").checked=cfg.split_bubbles;
     mergeSeconds.value = cfg.merge_wait_seconds ?? "";
@@ -370,12 +391,17 @@ af.onsubmit=e=>{e.preventDefault();withButton(e.submitter||af.querySelector("but
   await refresh(true,[kind+"_id",kind]);
   el("assetDialog").close();notice("资料已保存并选用");
 },msg=>el("assetResult").textContent=msg);};
-el("settings").onsubmit=e=>{
-  e.preventDefault();const section=document.querySelector("#settings .view:not([hidden])");
+function saveSettings(e){
+  e.preventDefault();const form=e.currentTarget;
+  const section=form===el("historySettings")?el("context"):document.querySelector("#settings .view:not([hidden])");
   if(!section)return;
-  for(const field of section.querySelectorAll("input,select,textarea"))if(!field.reportValidity())return;
-  withButton(section.querySelector(".savebar button"),async()=>{await persist(section);notice(section.id==="connect"?"回复设置已保存":section.id==="memory"?"记忆服务地址已保存":"设置已保存，下一轮生效");});
-};
+  const controls=Array.from(form.elements).filter(n=>section.contains(n));
+  const button=controls.find(n=>n.matches(".savebar button"));
+  if(!button || controls.some(n=>n.willValidate && !n.reportValidity()))return;
+  withButton(button,async()=>{await persist(section,controls);notice(section.id==="connect"?"回复设置已保存":section.id==="memory"?"记忆服务地址已保存":"设置已保存，下一轮生效");});
+}
+el("settings").onsubmit=saveSettings;
+el("historySettings").onsubmit=saveSettings;
 el("addService").onclick=()=>openService();
 el("syncStickers").onclick=e=>withButton(e.currentTarget,async()=>{notice((await api("stickers/sync",{})).message);await refresh();});
 for(const [id,mode] of [["dialCall","dial"],["answerCall","answer"],["stopCall","stop"]]){

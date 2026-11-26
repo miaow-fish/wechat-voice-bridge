@@ -235,7 +235,13 @@ def history(peer,current):
     return st.recent_dialogue(peer,current)
 
 
-def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=None):
+VOICE_REQUEST_NOTE = "对方这轮想听语音，按语音代号回复。"
+VOICE_DENIAL_NOTE = "语音条已准备好发送。请直接和对方聊一句，自选内容，无需解释功能。"
+CALL_RETRY_NOTE = "本轮对方没有邀请回拨。直接回答这轮的话。"
+MISSING_VOICE_NOTE = "你已选择用语音回复。根据同一段对话写下想说的话。这次只输出台词。"
+
+
+def chat_instructions(settings, *, group):
     system=("你正在参加微信群聊。结合发言者和群内上下文，决定此刻是否接话。" if group else
             "你在微信私聊中直接回复对方。可以简短，按当前消息的语境回答。")
     voice_on=bool(settings["tts"]!="off" and settings.get("voice"))
@@ -253,6 +259,11 @@ def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=Non
     if voice_on:
         system+="\n"+(spoken_reply.VOICE_INSTRUCTION if providers.has_audio_tags(settings)
                      else "用语音条时，台词写成可以直接朗读的话。")
+    return system
+
+
+def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=None):
+    system=chat_instructions(settings, group=bool(group))
     recent=history(peer,current)
     notes=[]
     if group:
@@ -260,7 +271,7 @@ def reply_messages(settings,peer,current,kind,parts,sources,*,now=None,group=Non
     if any(s!="微信文字" for s in sources):
         notes.append("来源（依次）："+"、".join(sources))
     if kind=="voice":
-        notes.append("对方这轮想听语音，按语音代号回复。")
+        notes.append(VOICE_REQUEST_NOTE)
     return conversation_prompt.build(settings,system,recent,parts,notes,now=now,private=not group)
 
 
@@ -390,7 +401,7 @@ def process(turn):
                 update(ident,status="silent",phase="group_decision",error=None)
                 return
             if kind=="voice" and VOICE_DENIAL.search(answer):
-                messages=conversation_prompt.with_chat_note(messages,"语音条已准备好发送。请直接和对方聊一句，自选内容，无需解释功能。")
+                messages=conversation_prompt.with_chat_note(messages,VOICE_DENIAL_NOTE)
                 answer=providers.chat(settings,messages,vision=vision)
                 if VOICE_DENIAL.search(answer):
                     raise ValueError("回复与当前可用的微信语音功能矛盾，正在重新生成")
@@ -399,7 +410,7 @@ def process(turn):
                 if allows_model_call(lines):
                     dispatch_call(ident,peer,lines)
                     return
-                messages=conversation_prompt.with_chat_note(messages,"本轮对方没有邀请回拨。直接回答这轮的话。")
+                messages=conversation_prompt.with_chat_note(messages,CALL_RETRY_NOTE)
                 answer=providers.chat(settings,messages,vision=vision)
                 plan=reply_actions.parse(answer)
                 if plan and plan[0][0]=="call":
@@ -423,7 +434,7 @@ def process(turn):
                     if action=="voice" and settings["tts"]=="off":
                         raise ValueError("私聊配置已关闭语音合成")
                     if action=="voice" and not value:
-                        writing=conversation_prompt.with_chat_note(messages,"你已选择用语音回复。根据同一段对话写下想说的话。这次只输出台词。")
+                        writing=conversation_prompt.with_chat_note(messages,MISSING_VOICE_NOTE)
                         value=providers.chat(settings,writing,vision=vision)
                         if reply_actions.SILENT in value or reply_actions.parse(value) or VOICE_DENIAL.search(value):
                             raise ValueError("语音台词仍未生成")

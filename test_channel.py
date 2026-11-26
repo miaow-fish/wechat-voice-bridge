@@ -25,6 +25,25 @@ from concurrent.futures import Future
 
 
 class ChannelTest(unittest.TestCase):
+    def test_builtin_preview_matches_model_messages_and_omits_personal_text(self):
+        personal={"persona":"个人测试人设","worldbook":"个人测试背景","pinned_context":"个人测试指令","private_context":"私聊测试指令"}
+        parts=[{"type":"text","text":"当前消息"}]
+        for enabled in (True,False):
+            cfg={**st.DEFAULT,"tts":"elevenlabs" if enabled else "off","voice":"fixture",
+                 "tts_model":"eleven_v4","asr":"xfyun" if enabled else "off","split_bubbles":enabled}
+            with st.database() as db: st.put(db,"profile",{**cfg,**personal})
+            with patch.object(worker,"history",side_effect=AssertionError("preview read history")), \
+                 patch.object(providers,"chat",side_effect=AssertionError("preview called a model")):
+                entries=panel.builtin_prompts()
+            texts={entry["title"]:entry["text"] for entry in entries}
+            for value in personal.values(): self.assertNotIn(value,str(entries))
+            with patch.object(worker,"history",return_value=[]):
+                for title,group in (("微信私聊",None),("微信群聊",{"name":"群"})):
+                    actual=worker.reply_messages(cfg,"peer",None,"text",parts,["微信文字"],group=group)
+                    self.assertEqual(texts[title],actual[0]["content"])
+            self.assertEqual(texts["实时语音电话"],worker.call_channel.call_messages(cfg,[],"喂")[0]["content"])
+            self.assertEqual("想另发一条时换行" in texts["微信私聊"],enabled)
+
     def test_unknown_sticker_reaches_chat_and_is_recognized_once_across_messages(self):
         self.bind()
         self.incoming("st1","",kind=47);self.incoming("st2","",kind=47)

@@ -11,6 +11,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 import channel_state as st
+import channel_worker
+import conversation_prompt
 import deepseek_case as ds
 import providers
 import sensevoice_local
@@ -158,6 +160,30 @@ def save_profile(data):
     return {"message": "设置已保存，下一轮生效"}
 
 
+def builtin_prompts():
+    with st.database() as db:
+        cfg = st.profile(db)
+    system = conversation_prompt.builtin_system
+    sticker_note = "已开启首次识图。" if cfg["sticker_vision"] == "once" else "首次识图当前已关闭。"
+    tone_service = cfg.get("tone_service", "off")
+    tone_note = {sensevoice_local.ROUTE:"当前使用本机 SenseVoice。", "off":"当前已关闭语气识别。"}.get(
+        tone_service, "当前已选用外部语气服务。"
+    )
+    entries = [
+        ("微信私聊", "在私聊里生成回复时使用。收到普通图片也沿用这段指令。", system(channel_worker.chat_instructions(cfg, group=False))),
+        ("微信群聊", "群发言设置允许调用模型时使用。", system(channel_worker.chat_instructions(cfg, group=True))),
+        ("实时语音电话", "接通后的每轮对话使用。", system(call_channel.CALL_INSTRUCTIONS)),
+        ("私聊请求语音", "本轮要发语音且需要模型写台词，附在当前用户消息末尾。", channel_worker.VOICE_REQUEST_NOTE),
+        ("语音初稿否认可用功能", "本轮已要求语音，模型却说无法发送时，带这句重新生成。", channel_worker.VOICE_DENIAL_NOTE),
+        ("未受邀拨号", "模型输出拨号代号，当前私聊消息未通过回拨条件时，带这句重新生成。", channel_worker.CALL_RETRY_NOTE),
+        ("补写语音台词", "模型输出了语音代号但缺少台词时使用。", channel_worker.MISSING_VOICE_NOTE),
+        ("识别陌生表情", "表情名与已有识别结果都未命中时交给识图模型。" + sticker_note, account_stickers.DESCRIPTION_INSTRUCTIONS),
+        ("按语境挑表情", "按名称匹配失败且允许按描述选择时，模型从当前账号的表情中挑选。", account_stickers.SELECTION_INSTRUCTIONS),
+        ("外部模型听语气", "仅在使用外部音频模型分析语气时发送。" + tone_note, providers.TONE_INSTRUCTIONS),
+    ]
+    return [{"title": title, "when": when, "text": text} for title, when, text in entries]
+
+
 def state():
     acct = wx()
     with st.database() as db:
@@ -223,6 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, (FILES/file).read_bytes(), mime)
             if path == "/api/state":
                 return self.reply(200,state())
+            if path == "/api/builtin-prompts":
+                return self.reply(200,builtin_prompts())
             if path == "/api/groups":
                 cursor=parse_qs(urlsplit(self.path).query).get("cursor",[""])[0]
                 return self.reply(200,group_chats.list_page(cursor))
@@ -312,7 +340,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    import channel_worker
     st.init()
     providers.initialize()
     for run in (channel_worker.collect, channel_worker.deliver):
