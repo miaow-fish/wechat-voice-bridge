@@ -117,6 +117,27 @@ class ChannelTest(unittest.TestCase):
         with patch.object(account_stickers,"wx",side_effect=assets),patch.object(account_stickers,"media",side_effect=AssertionError("unexpected download")):
             self.assertEqual(account_stickers.received("st3",st.DEFAULT),"〔微信表情 · 整包 · 开饭〕")
 
+    def test_quoted_sticker_uses_the_exact_original_after_restart(self):
+        self.bind()
+        def wire(mid, **attrs):
+            self.messages[mid]={"id":mid,"senderId":"peer","threadId":"peer","direction":"incoming",**attrs}
+            with st.database() as db: worker.ingest(db,{"kind":"message.committed","data":{
+                "threadId":"peer","messageId":mid,"direction":"incoming","origin":"live"}})
+        wire("first",type=47,serverId="100",sticker={"caption":"小兔打招呼"})
+        wire("second",type=47,serverId="101",sticker={"caption":"猫抱着枕头"})
+        wire("reply",type=49,appMessageType=57,body="这一张呢",quote={
+            "state":"missing","type":47,"serverId":"100","direction":"incoming","senderId":"peer"})
+        def parts():
+            with st.database() as db: row=db.execute("SELECT * FROM incoming WHERE id='reply'").fetchone()
+            return worker.input_parts([row],st.DEFAULT)[1][0]
+        self.messages["first"]["threadId"]="other"
+        self.assertNotIn("小兔",parts())
+        self.messages["first"]["threadId"]="peer"
+        self.messages["first"]["recall"]={"state":"recalled"}
+        self.assertNotIn("小兔",parts())
+        self.messages["first"].pop("recall")
+        self.assertEqual(parts(),"这一张呢\n〔引用〕〔微信表情 · 小兔打招呼〕")
+
     def test_worldbook_import_selects_only_active_entries_in_chat_and_call(self):
         source=json.dumps({"entries":{"0":{"constant":True,"content":"常驻背景"},"1":{"key":["山茶"],"content":"花园故事"},
                                        "2":{"constant":True,"disable":True,"content":"停用内容"}}},ensure_ascii=False)

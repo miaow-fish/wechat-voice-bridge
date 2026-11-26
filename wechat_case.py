@@ -53,9 +53,19 @@ def image_type(raw):
     raise ValueError("微信图片格式暂不支持")
 
 
+class UnavailableMedia(ValueError):
+    def __init__(self, reason):
+        super().__init__("微信没有可用的原媒体")
+        self.media_reason = reason if reason in {
+            "sticker_source_dns_not_public", "sticker_dns_failed", "sticker_fetch_failed",
+            "media_integrity_failed", "media_expired", "sticker_metadata_invalid",
+        } else "media_unavailable"
+
+
 def media(message_id, qualities):
     ref = "/messages/" + esc(message_id)
     assets = [a for a in wx(ref + "/media").get("items", []) if a.get("messageId") == message_id and a.get("id")]
+    reason = None
     for quality in qualities:
         asset = next((a for a in assets if a.get("variant") == quality
                       and a.get("state") not in ("unsupported", "expired", "recalled")), None)
@@ -79,4 +89,5 @@ def media(message_id, qualities):
             if not data or (asset.get("sha256") and hashlib.sha256(data).hexdigest() != asset["sha256"]):
                 raise ValueError("微信媒体校验失败")
             return data
-    raise ValueError("微信没有可用的原媒体")
+        reason = asset.get("reason") or reason
+    raise UnavailableMedia(reason)

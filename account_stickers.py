@@ -128,6 +128,10 @@ def summary(items, *, index_pixels=False):
     return groups
 
 
+def is_sticker(msg):
+    return msg.get("type")==47 or (msg.get("type")==49 and msg.get("appMessageType")==8)
+
+
 def incoming_label(msg,body,names):
     info=msg.get("sticker") or {}
     title=info.get("caption") or info.get("name") or info.get("description")

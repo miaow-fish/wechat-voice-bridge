@@ -145,12 +145,20 @@ def ingest(db, event):
         return
     if body.startswith("微信配对 "):
         return
+    sticker_server_id = None
     if kind == 49 and msg.get("appMessageType") == 57:
-        ref = (msg.get("quote") or {}).get("embeddedText")
+        quote = msg.get("quote") or {}
+        ref = quote.get("embeddedText")
+        if quote.get("state") == "recalled":
+            ref = "〔原消息已撤回〕"
+        elif account_stickers.is_sticker(quote) or quote.get("embeddedSticker"):
+            sticker_server_id = quote.get("serverId")
+            ref = account_stickers.UNKNOWN
         body = body + ("\n〔引用〕" + ref[:1500] if isinstance(ref,str) and ref.strip() else "")
         kind = 1
     elif kind == 47 or (kind == 49 and msg.get("appMessageType") == 8):
         kind = 47
+        sticker_server_id = msg.get("serverId")
         body = account_stickers.incoming_label(msg,body,st.get(db,"sticker_names",{}))
     elif kind not in (1,3,34):
         return
@@ -185,6 +193,8 @@ def ingest(db, event):
             serein_memory.enroll(db, turn, peer)
     db.execute("INSERT INTO incoming(id,peer,kind,body,stamp,turn) VALUES(?,?,?,?,?,?)",
                (mid,peer,kind,body[:16000],stamp,turn))
+    if isinstance(sticker_server_id,str) and re.fullmatch(r"[0-9]{1,20}",sticker_server_id):
+        db.execute("INSERT INTO sticker_refs VALUES(?,?)",(mid,sticker_server_id))
     if group:
         db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned,sender_key) VALUES(?,?,?,?)",
                    (mid,speaker,mentioned,st.group_sender_key(peer,sender)))
@@ -217,6 +227,55 @@ def collect():
         except Exception as exc:
             print("event poll:",type(exc).__name__,getattr(exc,"code",""),flush=True)
             time.sleep(5)
+
+
+def sticker_description(mid, settings):
+    try:
+        body = account_stickers.received(mid, settings)
+    except (OSError,ValueError,KeyError,IndexError) as exc:
+        # The media helper only exposes fixed reason codes, never signed URLs.
+        reason = getattr(exc, "media_reason", type(exc).__name__)
+        print("sticker read:",reason,flush=True)
+        return account_stickers.UNKNOWN
+    if body != account_stickers.UNKNOWN:
+        with st.database() as db:
+            db.execute("UPDATE incoming SET body=? WHERE id=? AND kind=47 AND body=?",
+                       (body,mid,account_stickers.UNKNOWN))
+    return body
+
+
+def quoted_sticker(row, settings):
+    with st.database() as db:
+        ref = db.execute("SELECT server_id FROM sticker_refs WHERE message_id=?", (row["id"],)).fetchone()
+        if not ref: return row["body"]
+        candidates = db.execute("""SELECT i.id FROM incoming i JOIN sticker_refs r ON r.message_id=i.id
+            WHERE i.peer=? AND i.kind=47 AND r.server_id=? LIMIT 2""",(row["peer"],ref[0])).fetchall()
+    # Confirm the quote and its target in the native account, including recalls.
+    parent = wx("/messages/"+esc(row["id"]))
+    quote = parent.get("quote") or {}
+    if parent.get("id") != row["id"] or parent.get("threadId") != row["peer"] or parent.get("recall") or quote.get("serverId") != ref[0]:
+        return row["body"]
+    if quote.get("state") == "recalled":
+        return row["body"].removesuffix(account_stickers.UNKNOWN)+"〔原消息已撤回〕"
+    if len(candidates) == 1:
+        possible = [wx("/messages/"+esc(candidates[0][0]))]
+    elif not candidates:
+        # Older messages and stickers sent by this account predate the local index.
+        possible = wx("/threads/"+esc(row["peer"])+"/messages?limit=100").get("items",[])
+    else:
+        return row["body"]
+    hits = [m for m in possible if m.get("id") and m.get("threadId")==row["peer"] and m.get("serverId")==ref[0]
+            and account_stickers.is_sticker(m) and not m.get("recall")
+            and (not quote.get("senderId") or m.get("senderId")==quote["senderId"])
+            and (not quote.get("direction") or m.get("direction")==quote["direction"])]
+    if len(hits) != 1: return row["body"]
+    mid = hits[0]["id"]
+    with st.database() as db:
+        prior = db.execute("SELECT body FROM incoming WHERE id=? AND peer=? AND kind=47",(mid,row["peer"])).fetchone()
+        label = prior[0] if prior else account_stickers.incoming_label(hits[0],hits[0].get("body") or "",st.get(db,"sticker_names",{}))
+    if label == account_stickers.UNKNOWN:
+        label = sticker_description(mid,settings)
+    return row["body"].removesuffix(account_stickers.UNKNOWN) + label
 
 
 def input_parts(rows, settings, *, bound_key=None):
@@ -254,13 +313,15 @@ def input_parts(rows, settings, *, bound_key=None):
             parts.append({"type":"text","text":"〔语音转写〕\n"+providers.with_tone(body,tone)})
         else:
             if row["kind"]==47 and body==account_stickers.UNKNOWN:
+                body=sticker_description(row["id"],settings)
+            elif row["kind"]==1 and body.endswith("\n〔引用〕"+account_stickers.UNKNOWN):
                 try:
-                    body=account_stickers.received(row["id"],settings)
+                    body=quoted_sticker(row,settings)
                 except (OSError,ValueError,KeyError,IndexError) as exc:
-                    print("sticker read:",type(exc).__name__,flush=True)
-                if body!=account_stickers.UNKNOWN:
+                    print("sticker quote:",type(exc).__name__,flush=True)
+                if body!=row["body"]:
                     with st.database() as db:
-                        db.execute("UPDATE incoming SET body=? WHERE id=? AND kind=47",(body,row["id"]))
+                        db.execute("UPDATE incoming SET body=? WHERE id=? AND body=?",(body,row["id"],row["body"]))
             sources.append("微信表情包" if row["kind"]==47 else "微信文字")
             parts.append({"type":"text","text":body})
         lines.append(body)

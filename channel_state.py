@@ -54,6 +54,9 @@ def init():
                 phase TEXT, error TEXT, attempts INTEGER DEFAULT 0, next_try REAL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS voice_inputs(
                 message_id TEXT PRIMARY KEY, transcript TEXT NOT NULL, provider TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sticker_refs(
+                message_id TEXT PRIMARY KEY REFERENCES incoming(id), server_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS sticker_refs_server ON sticker_refs(server_id);
             CREATE TABLE IF NOT EXISTS voice_tones(
                 message_id TEXT PRIMARY KEY REFERENCES voice_inputs(message_id), tone TEXT NOT NULL, status TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS turn_actions(
