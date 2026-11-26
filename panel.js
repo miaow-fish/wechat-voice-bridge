@@ -253,6 +253,10 @@ function renderModules(){
       const cue=node("select");cue.name="call_cue";
       cue.append(option("on","轻响一下"),option("off","自然停顿"));cue.value=cfg.call_cue;
       tools.append(label("电话里助手说完一轮后",cue));
+      const interrupt=node("input");interrupt.type="checkbox";interrupt.name="call_barge_in";
+      interrupt.className="switch";interrupt.setAttribute("role","switch");
+      interrupt.checked=cfg.call_barge_in;
+      tools.append(label("插话时打断助手",interrupt));
       row.append(tools);
     }
     parent.append(row);
@@ -330,7 +334,8 @@ function applyState(s,force=false,discard=[]){
   }
   el("syncStickers").disabled=!s.logged;
   const call=s.call||{};el("callStatus").textContent=(call.stage||"尚未测试")+" · 收到音频 "+((call.received||0)*.02).toFixed(1)+" 秒 · 发出音频 "+((call.sent||0)*.02).toFixed(1)+" 秒";
-  if(call.latencyMs)el("callStatus").textContent+=" · 上一轮开口用时 "+(call.latencyMs["到第一帧"]/1000).toFixed(1)+" 秒";
+  if(Number.isFinite(call.latencyMs?.["到第一帧"]))el("callStatus").textContent+=" · 上一轮开口用时 "+(call.latencyMs["到第一帧"]/1000).toFixed(1)+" 秒";
+  if(call.maxFeedGapMs>20)el("callStatus").textContent+=" · 本机播放供音最长中断 "+call.maxFeedGapMs+" 毫秒";
   el("dialCall").disabled=el("answerCall").disabled=!s.logged||!s.paired||Boolean(call.active);el("stopCall").disabled=!call.active;
   el("last").textContent=!s.last?"还没有聊天记录":s.last.status==="silent"?"最近一轮群聊，助手选择旁听":s.last.status==="disabled"?"本轮已随群聊设置关闭":s.last.status==="accepted"?"最近一轮已取得微信回执":s.last.status==="call_connected"?"最近一通微信电话已接通":s.last.status==="call_requested"?"已发起微信通话":s.last.error||"正在处理本轮消息";
   if(s.cursor_gap)el("last").textContent+="。曾有微信事件过期，期间可能漏收。";

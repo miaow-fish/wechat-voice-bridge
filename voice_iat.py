@@ -25,7 +25,7 @@ async def recognize_pcm(pcm, credentials, language="zh_cn", accent="mandarin"):
     return await recognize_stream(chunks(),credentials,language,accent)
 
 
-async def recognize_stream(chunks, credentials, language, accent):
+async def recognize_stream(chunks, credentials, language, accent, *, on_final=None):
     from websockets.asyncio.client import connect
     async with asyncio.timeout(85), connect(signed_url(credentials),open_timeout=8,proxy=None) as socket:
         async def send_audio():
@@ -59,6 +59,8 @@ async def recognize_stream(chunks, credentials, language, accent):
                     text = "".join(words[k] for k in sorted(words)).strip()
                     if not text:
                         raise ValueError("讯飞没有识别到语音")
+                    if on_final is not None:
+                        on_final(text)
                     return text
         finally:
             writer.cancel()
@@ -69,7 +71,27 @@ async def recognize_stream(chunks, credentials, language, accent):
 class LiveDictation:
     def __init__(self,cfg):
         self.frames=asyncio.Queue()
-        self.task=asyncio.create_task(recognize_stream(self.chunks(),cfg["_call_iat"],cfg["asr_language"],cfg["asr_accent"]))
+        self.ready = asyncio.Event()
+        self.text = None
+        self.task = asyncio.create_task(recognize_stream(
+            self.chunks(), cfg["_call_iat"], cfg["asr_language"], cfg["asr_accent"], on_final=self._final))
+        self.task.add_done_callback(self._closed)
+
+    def _final(self, text):
+        # The final transcript is usable while the WebSocket still closes gracefully.
+        self.text = text
+        self.ready.set()
+
+    def _closed(self, task):
+        if not task.cancelled():
+            task.exception()  # Also consume errors for an utterance abandoned when a call ends.
+        self.ready.set()
+
+    async def transcript(self):
+        await self.ready.wait()
+        if self.text is not None:
+            return self.text
+        return await self.task
 
     async def chunks(self):
         buf=bytearray()

@@ -10,6 +10,7 @@ from unittest.mock import patch
 import call_channel as calls
 import channel_state as st
 import providers
+import voice_iat
 
 
 class Socket:
@@ -31,6 +32,104 @@ class Socket:
 
 
 class DirectCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_final_dictation_reaches_chat_before_socket_teardown(self):
+        closing = asyncio.Event()
+        cfg = st.DEFAULT | {"_call_iat": {}}
+
+        async def recognize(chunks, credentials, language, accent, *, on_final):
+            on_final("听清了")
+            await closing.wait()
+            return "听清了"
+
+        with patch.object(voice_iat, "recognize_stream", recognize):
+            live = voice_iat.LiveDictation(cfg)
+            try:
+                self.assertEqual(await asyncio.wait_for(live.transcript(), .5), "听清了")
+                self.assertFalse(live.task.done())
+            finally:
+                closing.set()
+                await live.task
+        with patch.object(voice_iat, "recognize_stream", side_effect=ValueError("听写失败")):
+            live = voice_iat.LiveDictation(cfg)
+            with self.assertRaisesRegex(ValueError, "听写失败"):
+                await asyncio.wait_for(live.transcript(), .5)
+
+    async def test_barge_in_off_finishes_audio_and_retains_the_overlapping_utterance(self):
+        ctl, media = Socket(), Socket()
+        signal = calls.Signal(ctl, Event())
+        signal.owned = "ours"
+        signal.call["ours"] = {"state": "connected"}
+        ready = {"protocolVersion": 3,
+                 "sendTracks": [{"media": "audio", "id": 1, "generation": 1, "format": calls.FORMAT}],
+                 "receiveTracks": [{"media": "audio", "id": 2, "generation": 1}]}
+        speech = calls.pcm_frame(2, 1, struct.pack("<h", 1600)*320*9 + bytes(640*45))
+        first, second = (struct.pack("<h", n)*320 for n in (35, 42))
+        received = bytearray()
+
+        def listen(frame):
+            if isinstance(frame, bytes):
+                received.extend(calls.read_frame(frame)[2])
+                if received == first:
+                    media.event(speech)
+                if received.endswith(calls.CHIME):
+                    ctl.event({"type": "call.state", "call": {"callId": "ours", "state": "ended"}})
+
+        media.on_send = listen
+        media.event(speech)
+        cfg = st.DEFAULT | {"call_barge_in": False, "call_cue": "on"}
+        with patch.object(providers, "recognize_pcm", side_effect=["那先这样", "等等，还有件事"]), \
+             patch.object(providers, "chat", side_effect=["晚安\n"+calls.END_MARK, "我听着"]) as chat, \
+             patch.object(providers, "synthesize_pcm", side_effect=[first*12, second*4]):
+            await asyncio.wait_for(calls.conversation(signal, media, ready, cfg, signal.flag), 4)
+        self.assertEqual(received, first*12 + second*4 + calls.CHIME)
+        self.assertEqual(ctl.sent, [])
+        messages = chat.call_args_list[1].args[1]
+        self.assertIn({"role": "assistant", "content": "晚安"}, messages)
+        self.assertIn("等等，还有件事", messages[-1]["content"])
+
+    async def test_playout_reserve_absorbs_an_uneven_stream_and_delivers_every_sample(self):
+        ctl, media = Socket(), Socket()
+        signal = calls.Signal(ctl, Event())
+        signal.owned = "ours"
+        signal.call["ours"] = {"state": "connected"}
+        ready = {"protocolVersion": 3,
+                 "sendTracks": [{"media": "audio", "id": 1, "generation": 1, "format": calls.FORMAT}],
+                 "receiveTracks": [{"media": "audio", "id": 2, "generation": 1}]}
+        media.event(calls.pcm_frame(2, 1, struct.pack("<h", 1800)*320*10 + bytes(640*45)))
+        first, tail = bytes([3, 0])*320*5, bytes([4, 0])*320*12
+        received = bytearray()
+        gaps = []
+        clock = asyncio.get_running_loop().time
+        audio_until = 0
+
+        async def delayed_stream(client, cfg, text):
+            next_arrival = clock() + .165
+            yield first
+            await asyncio.sleep(max(0, next_arrival-clock()))
+            yield tail
+
+        def hear(frame):
+            nonlocal audio_until
+            if not isinstance(frame, bytes):
+                return
+            now = clock()
+            if received:
+                gaps.append(max(0, now-audio_until))
+            block = calls.read_frame(frame)[2]
+            audio_until = max(now, audio_until) + len(block)/32000
+            received.extend(block)
+            if len(received) == len(first)+len(tail):
+                ctl.event({"type": "call.state", "call": {"callId": "ours", "state": "ended"}})
+
+        media.on_send = hear
+        with patch.object(providers, "recognize_pcm", return_value="听到了"), \
+             patch.object(providers, "chat", return_value="继续说"), \
+             patch.object(providers, "stream_call_pcm", delayed_stream), patch.object(calls, "TURN_PAUSE", 0):
+            await asyncio.wait_for(calls.conversation(signal, media, ready,
+                                   st.DEFAULT | {"_tts_client": object()}, signal.flag), 3)
+        self.assertEqual(received, first + tail)
+        self.assertLess(max(gaps), .035)
+
     def test_history_counts_user_turns_when_a_spoken_reply_is_interrupted(self):
         history = [
             {"role":"user","content":"第一轮"},
