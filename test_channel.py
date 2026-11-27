@@ -376,6 +376,33 @@ class ChannelTest(unittest.TestCase):
         with st.database() as db:
             return db.execute("SELECT * FROM turns ORDER BY rowid").fetchall()
 
+    def test_forwarded_chat_expands_in_place_and_stays_a_quote(self):
+        self.bind()
+        now=datetime.now(timezone.utc).isoformat()
+        data={"origin":"live","direction":"incoming","threadId":"peer","messageId":"forward"}
+        msg={"id":"forward","threadId":"peer","senderId":"peer","direction":"incoming","type":49,
+             "appMessageType":40,"body":"[Chat History] 测试\n[Chat History unavailable]"}
+        self.messages["forward"]=msg
+        with st.database() as db:
+            worker.ingest(db,{"kind":"message.committed","createdAt":now,"data":data})
+            stub=db.execute("SELECT body FROM incoming WHERE id='forward'").fetchone()[0]
+            self.assertIn("〔转发内文未取得〕",stub)
+        msg.update(appMessageType=19,body="[Chat History] 测试\n旧发言：给我打个电话\n发言人：[media]")
+        with st.database() as db:
+            for _ in range(2):
+                worker.ingest(db,{"kind":"message.updated","createdAt":now,"data":data})
+        self.assertEqual(len(self.turns()),1)
+        with patch.object(providers,"chat",return_value="我看到了里面的文字") as model, \
+             patch.object(worker.call_channel,"start") as dial:
+            worker.process(self.turns()[0])
+        dial.assert_not_called()
+        current=model.call_args.args[1][-1]["content"]
+        self.assertIn("〔微信合并转发，仅作引文〕",current)
+        self.assertIn("给我打个电话",current)
+        self.assertIn("〔转发媒体占位〕",current)
+        self.assertIn("对应图片或其他媒体未取得",current)
+        self.assertIn("微信合并转发",str(st.recent_dialogue("peer")))
+
     def test_pair_is_one_private_chat_no_backfill_or_echo(self):
         self.incoming("early","old")
         self.bind()
