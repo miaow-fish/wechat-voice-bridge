@@ -288,7 +288,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/groups/refresh":
                 return self.reply(200,group_chats.refresh_page())
             if path == "/api/groups":
-                return self.reply(200,group_chats.configure(data.get("id"),data.get("mode")))
+                return self.reply(200,group_chats.configure(data.get("id"),data.get("mode"),data.get("passive_wait")))
             if path == "/api/settings":
                 return self.reply(200, save_profile(data))
             if path == "/api/providers":

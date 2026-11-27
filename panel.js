@@ -74,6 +74,23 @@ function renderGroupRows(list, groups, routes, verified) {
       finally{control.disabled=false;}
     };
     list.append(label(name,control));
+    if(mode==="natural" && verified) {
+      const interval=node("input");
+      interval.type="number";interval.min="1";interval.max="120";interval.step="1";interval.required=true;
+      interval.inputMode="numeric";
+      interval.defaultValue=String(routes[id]?.passive_wait ?? 60);
+      interval.setAttribute("aria-label",name+"的旁听判断间隔（秒）");
+      interval.onchange=async()=>{
+        if(!interval.reportValidity())return;
+        interval.disabled=true;control.disabled=true;
+        try {
+          const result=await api("groups",{id,mode,passive_wait:interval.valueAsNumber});
+          await refresh();notice(result.message);
+        } catch(e) {interval.value=interval.defaultValue;notice(e.message);}
+        finally {interval.disabled=false;control.disabled=false;}
+      };
+      list.append(label("旁听判断间隔（秒）",interval));
+    }
   }
 }
 function showGroups(routes) {

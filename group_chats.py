@@ -7,8 +7,9 @@ import channel_state as st
 from wechat_case import esc, wx
 
 
-NATURAL_DIRECT_WAIT = 2
-NATURAL_PASSIVE_WAIT = 30
+NATURAL_DIRECT_WAIT = 3
+NATURAL_PASSIVE_WAIT = 60
+NATURAL_PASSIVE_MAX = 120
 
 
 def list_page(cursor=""):
@@ -53,11 +54,14 @@ def refresh_page():
     return page
 
 
-def configure(peer, mode):
+def configure(peer, mode, passive_wait=None):
     if not isinstance(peer, str) or not peer.endswith("@chatroom") or len(peer)>256:
         raise ValueError("请选择微信账号已加入的群")
     if mode not in ("off", "auto", "mention", "natural"):
         raise ValueError("请选择有效的群聊发言方式")
+    if passive_wait is not None and (mode != "natural" or type(passive_wait) is not int
+                                     or not 1 <= passive_wait <= NATURAL_PASSIVE_MAX):
+        raise ValueError(f"旁听判断间隔请填 1 到 {NATURAL_PASSIVE_MAX} 秒的整数")
     if mode != "off":
         if not wx().get("authenticated"):
             raise ValueError("请先登录助手微信")
@@ -68,6 +72,8 @@ def configure(peer, mode):
         db.execute("BEGIN IMMEDIATE")
         routes = st.get(db, "group_routes", {})
         previous = routes.get(peer, {})
+        if passive_wait is not None and previous.get("mode") != "natural":
+            raise ValueError("请先保存该群的自然接话模式")
         if previous.get("mode", "off") != mode:
             db.execute("""UPDATE turns SET status='disabled', phase='group_setting', error=NULL
                           WHERE scope='group' AND peer=? AND status IN ('collecting','sealed','ready')""", (peer,))
@@ -75,6 +81,11 @@ def configure(peer, mode):
                 routes.pop(peer, None)
             else:
                 routes[peer] = {"name": group.get("displayName") or peer, "mode": mode, "since": time.time()}
+                if "passive_wait" in previous:
+                    routes[peer]["passive_wait"] = previous["passive_wait"]
+            st.put(db, "group_routes", routes)
+        elif passive_wait is not None:
+            routes[peer] = {**previous, "passive_wait": passive_wait}
             st.put(db, "group_routes", routes)
     return {"message": "群聊设置已保存"}
 

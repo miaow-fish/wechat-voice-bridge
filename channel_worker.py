@@ -176,13 +176,17 @@ def ingest(db, event):
     mentions = msg.get("mentions") or {}
     mentioned = bool(group and mentions.get("state")=="known" and mentions.get("self") is True)
     db.execute("BEGIN IMMEDIATE")
-    if group and st.get(db,"group_routes",{}).get(peer) != group:
-        return
+    if group:
+        current_group = st.get(db,"group_routes",{}).get(peer)
+        if not current_group or current_group["since"] != group["since"] or current_group["mode"] != group["mode"]:
+            return
+        group = current_group
     if db.execute("SELECT 1 FROM incoming WHERE id=?",(mid,)).fetchone():
         return
     addressed = mentioned or quoted_self
     if natural:
-        wait_seconds = group_chats.NATURAL_DIRECT_WAIT if addressed else group_chats.NATURAL_PASSIVE_WAIT
+        passive_wait = group.get("passive_wait", group_chats.NATURAL_PASSIVE_WAIT)
+        wait_seconds = group_chats.NATURAL_DIRECT_WAIT if addressed else passive_wait
     else:
         wait_seconds = st.merge_window(st.get(db, "profile", {}))
     active = db.execute("SELECT id,next_try FROM turns WHERE status='collecting' AND peer=? ORDER BY rowid DESC LIMIT 1",(peer,)).fetchone()

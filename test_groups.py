@@ -127,37 +127,37 @@ class GroupTest(unittest.TestCase):
             st.put(db, "profile", {"merge_messages": True, "merge_wait_seconds": 10})
         now = time.time()
         self.add("background", "大家聊天", stamp=now)
-        self.assertAlmostEqual(self.turn("background")["next_try"], now+30, places=5)
+        self.assertAlmostEqual(self.turn("background")["next_try"], now+60, places=5)
         self.add("mention", "看看这条", stamp=now+5, mentions={"state": "known", "self": True})
         self.add("other", "群里还在聊", sender="b", stamp=now+6)
-        self.add("again", "还有这个", stamp=now+6.5, mentions={"state": "known", "self": True})
-        self.add("outgoing", "上轮回复", direction="outgoing", origin="local_send", stamp=now+6.5)
+        self.add("again", "还有这个", stamp=now+7.7, mentions={"state": "known", "self": True})
+        self.add("outgoing", "上轮回复", direction="outgoing", origin="local_send", stamp=now+7.7)
         self.add("private", "私聊消息", peer="friend", sender="friend", stamp=now+5)
         self.assertEqual(self.turn("background")["id"], self.turn("again")["id"])
-        self.assertAlmostEqual(self.turn("mention")["next_try"], now+7, places=5)
+        self.assertAlmostEqual(self.turn("mention")["next_try"], now+8, places=5)
         self.assertAlmostEqual(self.turn("private")["next_try"], now+15, places=5)
         with patch.object(providers, "check_routes"):
             panel.save_profile({"merge_wait_seconds": 15})
-        self.assertAlmostEqual(self.turn("mention")["next_try"], now+7, places=5)
+        self.assertAlmostEqual(self.turn("mention")["next_try"], now+8, places=5)
         self.assertAlmostEqual(self.turn("private")["next_try"], now+20, places=5)
         with st.database() as db:
-            with patch.object(worker.time, "time", return_value=now+6.9):
+            with patch.object(worker.time, "time", return_value=now+7.9):
                 self.assertIsNone(worker.next_turn(db, "group"))
-            with patch.object(worker.time, "time", return_value=now+7.1):
+            with patch.object(worker.time, "time", return_value=now+8.1):
                 self.assertEqual(worker.next_turn(db, "group")["id"], self.turn("mention")["id"])
 
     def test_natural_quote_knows_who_was_quoted_and_can_stay_quiet(self):
         group_chats.configure(ROOM, "natural")
         now = time.time()
         self.add("other-quote", "同意", stamp=now, quote={"direction": "incoming", "embeddedText": "群友说的"})
-        self.add("busy", "群友还在聊", stamp=now+29)
-        self.assertAlmostEqual(self.turn("busy")["next_try"], now+30, places=5)
+        self.add("busy", "群友还在聊", stamp=now+59)
+        self.assertAlmostEqual(self.turn("busy")["next_try"], now+60, places=5)
         with patch.object(providers, "chat", return_value=reply_actions.SILENT) as model:
             worker.process(self.turn("other-quote"))
         self.assertIn("只有确实有话值得接", model.call_args.args[1][-1]["content"])
         self.assertEqual(self.sent, [])
-        self.add("own-quote", "再讲讲", stamp=now+31, quote={"direction": "outgoing", "embeddedText": "助手说的"})
-        self.assertAlmostEqual(self.turn("own-quote")["next_try"], now+33, places=5)
+        self.add("own-quote", "再讲讲", stamp=now+61, quote={"direction": "outgoing", "embeddedText": "助手说的"})
+        self.assertAlmostEqual(self.turn("own-quote")["next_try"], now+64, places=5)
         with patch.object(providers, "chat", return_value="好呀") as model:
             worker.process(self.turn("own-quote"))
         self.assertIn("引用了你", model.call_args.args[1][-1]["content"])
@@ -168,13 +168,33 @@ class GroupTest(unittest.TestCase):
         group_chats.configure(ROOM, "natural")
         now = time.time()
         self.add("earlier", "群友聊天", stamp=now)
-        self.add("addressed", "找助手", stamp=now+31, mentions={"state": "known", "self": True})
+        self.add("addressed", "找助手", stamp=now+61, mentions={"state": "known", "self": True})
         with patch.object(providers, "chat") as model:
             worker.process(self.turn("earlier"))
         model.assert_not_called()
         self.assertEqual(self.sent, [])
         self.assertEqual(self.turn("earlier")["status"], "silent")
         self.assertIn("群友聊天", str(st.recent_dialogue(ROOM)))
+
+    def test_natural_passive_interval_is_per_group_and_capped_at_two_minutes(self):
+        group_chats.configure(ROOM, "natural")
+        group_chats.configure(OTHER, "natural")
+        with self.assertRaises(ValueError):
+            group_chats.configure(ROOM, "natural", 121)
+        with self.assertRaises(ValueError):
+            group_chats.configure(ROOM, "natural", True)
+        with st.database() as db:
+            since=st.get(db, "group_routes")[ROOM]["since"]
+        group_chats.configure(ROOM, "natural", 120)
+        now=time.time()
+        self.add("slow", "这边等两分钟", stamp=now)
+        self.add("default", "这边用默认", stamp=now, peer=OTHER)
+        self.assertAlmostEqual(self.turn("slow")["next_try"], now+120, places=5)
+        self.assertAlmostEqual(self.turn("default")["next_try"], now+60, places=5)
+        with st.database() as db:
+            self.assertEqual(st.get(db, "group_routes")[ROOM]["since"], since)
+        self.add("mention", "直接找你", stamp=now+4, mentions={"state":"known","self":True})
+        self.assertAlmostEqual(self.turn("mention")["next_try"], now+7, places=5)
 
     def test_quoting_action_names_in_group_text_keeps_the_reply(self):
         self.add("quote","这两个代号怎么写")

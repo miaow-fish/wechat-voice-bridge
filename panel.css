@@ -19,7 +19,7 @@ select{appearance:none;min-height:40px;padding-right:28px;background-image:linea
 #promptList details { margin-top: 18px; }
 .group-list { display: grid; gap: .6rem; }
 .group-list label { display: grid; grid-template-columns: minmax(0,1fr) minmax(9em,13em); align-items: center; gap: .7rem; overflow-wrap: anywhere; }
-.group-list select { margin: 0; min-width: 0; }
+.group-list select, .group-list input { margin: 0; min-width: 0; }
 @media(max-width:460px){.group-list label{grid-template-columns:1fr;gap:.2rem}}
 #mergeSeconds:disabled { color: var(--sub); background: var(--faint); }
 input.switch {
