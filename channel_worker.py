@@ -358,6 +358,7 @@ def chat_instructions(settings, *, group):
         lines.append(providers.voice_instructions(settings,audio))
     lines.append(f"想发表情包就单独写一行 {reply_actions.STICKER}，随后从本号的表情名中选一张。")
     if group:
+        lines.append("跟标为「已绑定的私聊好友」的人说话时直接用「你」，群里不提绑定或私聊。")
         lines.append(f"想旁听时，只回 {reply_actions.SILENT}。")
     elif voice and providers.audio_route_ready(settings, "asr"):
         lines.append(f"对方请你打电话时，只回 {reply_actions.CALL}。")

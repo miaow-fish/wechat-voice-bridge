@@ -142,21 +142,23 @@ class GroupTest(unittest.TestCase):
             with patch.object(providers,"chat",return_value="[[silent]]") as model:
                 worker.process(self.turn("first"))
             wire=model.call_args.args[1]
-            self.assertIn("〔已绑定的私聊好友〕〔群成员 乙〕\n同名时的第一句\n〔群成员 乙〕\n同名时的第二句",wire[-1]["content"])
+            self.assertIn("〔已绑定的私聊好友〕\n同名时的第一句\n〔群成员 乙〕\n同名时的第二句",wire[-1]["content"])
             self.add("renamed","换名字了",mentions={"state":"known","self":True},stamp=now+10)
             with patch.object(providers,"chat",return_value="[[silent]]") as model:
                 worker.process(self.turn("renamed"))
         second=model.call_args.args[1]
         self.assertEqual(wire[0],second[0])
-        self.assertIn("〔已绑定的私聊好友〕〔群成员 新群昵称 · @了你〕",second[-1]["content"])
-        self.assertIn("〔已绑定的私聊好友〕〔群成员 乙〕",second[1]["content"])
+        self.assertIn("〔已绑定的私聊好友 · @了你〕",second[-1]["content"])
+        self.assertNotIn("新群昵称",str(second))
+        self.assertIn("直接用「你」",second[0]["content"])
+        self.assertIn("〔已绑定的私聊好友〕",second[1]["content"])
         for secret in ("私聊原话","私聊回答","电话原话","电话回答","私聊专用设定",st.group_sender_key(ROOM,"a")):
             self.assertNotIn(secret,str(second))
         self.assertFalse(any(msg.get("threadId")==ROOM for msg in self.sent))
         with st.database() as db:
             st.put(db,"peer","b")
         changed=st.recent_dialogue(ROOM)
-        self.assertIn("〔群成员 乙〕\n同名时的第一句\n〔已绑定的私聊好友〕〔群成员 乙〕\n同名时的第二句",changed[0]["content"])
+        self.assertIn("〔群成员 乙〕\n同名时的第一句\n〔已绑定的私聊好友〕\n同名时的第二句",changed[0]["content"])
         self.assertNotIn("已绑定的私聊好友",changed[-1]["content"])
         with st.database() as db:
             st.put(db,"peer",None)
@@ -199,7 +201,7 @@ class GroupTest(unittest.TestCase):
         for token in ("私聊专用测试","小猫鼓掌","开心","〔已绑定的私聊好友〕"):
             self.assertNotIn(token,head["content"])
         words=last["content"]
-        self.assertIn("〔群成员 乙〕\n〔微信表情画面 · 小猫鼓掌〕\n〔已绑定的私聊好友〕〔群成员 甲〕\n〔语音转写〕\n收到啦〔开心〕",words)
+        self.assertIn("〔群成员 乙〕\n〔微信表情画面 · 小猫鼓掌〕\n〔已绑定的私聊好友〕\n〔语音转写〕\n收到啦〔开心〕",words)
         self.assertGreater(words.index("〔当前北京时间〕"),words.index("收到啦"))
 
     def test_group_repairs_display_labels_then_sends_two_voice_notes_and_real_sticker(self):

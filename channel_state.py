@@ -111,8 +111,8 @@ def group_sender_key(room, sender):
 def speaker_line(row, bound_key=None):
     if "speaker" not in row.keys() or not row["speaker"]:
         return ""
-    identity = "〔已绑定的私聊好友〕" if bound_key and row["sender_key"] == bound_key else ""
-    return identity + "〔群成员 " + row["speaker"] + (" · @了你" if row["mentioned"] else "") + "〕"
+    label = "已绑定的私聊好友" if bound_key and row["sender_key"] == bound_key else "群成员 " + row["speaker"]
+    return "〔" + label + (" · @了你" if row["mentioned"] else "") + "〕"
 
 
 def merge_window(settings):
