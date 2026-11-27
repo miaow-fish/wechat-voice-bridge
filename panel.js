@@ -63,7 +63,7 @@ function renderGroupRows(list, groups, routes, verified) {
     const mode=routes[id]?.mode || "off";
     if(!verified && mode==="off"){list.append(node("div",name));continue;}
     const control=node("select");
-    for(const [value,title] of [["off","关闭"],["auto","由助手决定"],["mention","仅 @助手 时参与"]])
+    for(const [value,title] of [["off","关闭"],["auto","由助手决定"],["mention","仅 @助手 时参与"],["natural","自然接话"]])
       if(verified || value==="off" || value===mode)control.append(option(value,title));
     control.value=mode;
     control.onchange=async()=>{

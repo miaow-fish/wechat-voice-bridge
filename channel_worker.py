@@ -106,10 +106,12 @@ def ingest(db, event):
     if not isinstance(peer,str) or not peer or not mid:
         return
     group = st.get(db,"group_routes",{}).get(peer) if peer.endswith("@chatroom") else None
+    natural = group is not None and group["mode"] == "natural"
     if not group and (peer.endswith("@chatroom") or (bound and bound != peer)):
         return
     if data.get("direction") == "outgoing" and (bound == peer or group) and data.get("origin") in ("local_send","live"):
-        db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE peer=? AND status='collecting'",(peer,))
+        if not natural:
+            db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE peer=? AND status='collecting'",(peer,))
         return
     if data.get("direction") != "incoming" or data.get("origin") != "live":
         return
@@ -146,8 +148,10 @@ def ingest(db, event):
     if body.startswith("微信配对 "):
         return
     sticker_server_id = None
+    quoted_self = False
     if kind == 49 and msg.get("appMessageType") == 57:
         quote = msg.get("quote") or {}
+        quoted_self = natural and quote.get("direction") == "outgoing"
         ref = quote.get("embeddedText")
         if quote.get("state") == "recalled":
             ref = "〔原消息已撤回〕"
@@ -176,11 +180,20 @@ def ingest(db, event):
         return
     if db.execute("SELECT 1 FROM incoming WHERE id=?",(mid,)).fetchone():
         return
-    wait_seconds = st.merge_window(st.get(db, "profile", {}))
+    addressed = mentioned or quoted_self
+    if natural:
+        wait_seconds = group_chats.NATURAL_DIRECT_WAIT if addressed else group_chats.NATURAL_PASSIVE_WAIT
+    else:
+        wait_seconds = st.merge_window(st.get(db, "profile", {}))
     active = db.execute("SELECT id,next_try FROM turns WHERE status='collecting' AND peer=? ORDER BY rowid DESC LIMIT 1",(peer,)).fetchone()
     if wait_seconds and active and stamp <= active["next_try"]:
         turn = active["id"]
-        db.execute("UPDATE turns SET next_try=max(next_try,?) WHERE id=?", (stamp + wait_seconds, turn))
+        if not natural:
+            db.execute("UPDATE turns SET next_try=max(next_try,?) WHERE id=?", (stamp + wait_seconds, turn))
+        elif addressed and not db.execute("""SELECT 1 FROM incoming i JOIN group_inputs g ON g.message_id=i.id
+                WHERE i.turn=? AND (g.mentioned OR g.quoted_self) LIMIT 1""", (turn,)).fetchone():
+            # The first direct address upgrades a passive batch and starts its fixed wait.
+            db.execute("UPDATE turns SET next_try=? WHERE id=?", (stamp + wait_seconds, turn))
     else:
         if active:
             db.execute("UPDATE turns SET status='sealed', next_try=0 WHERE id=?", (active["id"],))
@@ -196,8 +209,8 @@ def ingest(db, event):
     if isinstance(sticker_server_id,str) and re.fullmatch(r"[0-9]{1,20}",sticker_server_id):
         db.execute("INSERT INTO sticker_refs VALUES(?,?)",(mid,sticker_server_id))
     if group:
-        db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned,sender_key) VALUES(?,?,?,?)",
-                   (mid,speaker,mentioned,st.group_sender_key(peer,sender)))
+        db.execute("INSERT INTO group_inputs(message_id,speaker,mentioned,sender_key,quoted_self) VALUES(?,?,?,?,?)",
+                   (mid,speaker,mentioned,st.group_sender_key(peer,sender),quoted_self))
 
 
 def collect():
@@ -478,6 +491,15 @@ def ensure_group_open(peer, ident):
                 raise GroupTurnClosed()
 
 
+def later_group_address(peer, turn):
+    with st.database() as db:
+        return db.execute("""SELECT 1 FROM turns t JOIN incoming i ON i.turn=t.id
+            JOIN group_inputs g ON g.message_id=i.id
+            WHERE t.peer=? AND t.rowid>(SELECT rowid FROM turns WHERE id=?)
+              AND t.status IN ('collecting','sealed','ready') AND (g.mentioned OR g.quoted_self)
+            LIMIT 1""", (peer,turn)).fetchone() is not None
+
+
 def process(turn):
     ident, peer = turn["id"], turn["peer"]
     with st.database() as db:
@@ -492,7 +514,7 @@ def process(turn):
         elif peer != bound:
             raise ValueError("私聊绑定已改变")
         settings = st.profile(db)
-        rows = db.execute("""SELECT i.*,g.speaker,g.mentioned,g.sender_key FROM incoming i
+        rows = db.execute("""SELECT i.*,g.speaker,g.mentioned,g.quoted_self,g.sender_key FROM incoming i
                              LEFT JOIN group_inputs g ON g.message_id=i.id WHERE i.turn=? ORDER BY i.rowid""",
                           (ident,)).fetchall()
         planned=db.execute("SELECT 1 FROM turn_actions WHERE turn_id=?",(ident,)).fetchone()
@@ -503,6 +525,11 @@ def process(turn):
     voice_wire = turn["wire"] if kind == "voice" else None
     chosen = None
     if not answer:
+        natural = group is not None and group["mode"] == "natural"
+        addressed = natural and any(row["mentioned"] or row["quoted_self"] for row in rows)
+        if natural and not addressed and later_group_address(peer,ident):
+            update(ident,status="silent",phase="group_yield",error=None)
+            return
         if group and group["mode"]=="mention" and not any(r["mentioned"] for r in rows):
             update(ident,status="silent",phase="group_mention",error=None)
             return
@@ -545,9 +572,21 @@ def process(turn):
                     reply_actions.check_media_format(result, split=split)
                 return result
 
-            answer = draft(VOICE_REQUEST_NOTE if kind=="voice" else None)
+            note = VOICE_REQUEST_NOTE if kind=="voice" else None
+            if natural:
+                if addressed:
+                    note = "本轮有人 @ 你或引用你的消息。自然接他的话并给出回应。"
+                else:
+                    note = f"这是群友之间的聊天。只有确实有话值得接时才发一句，否则只回 {reply_actions.SILENT}。"
+            answer = draft(note)
+            if addressed and answer.strip() == reply_actions.SILENT:
+                ensure_group_open(peer,ident)
+                answer = draft(note + " 对这条直接招呼请回一句。")
             serein_memory.used(ident,memory)
             ensure_group_open(peer,ident)
+            if natural and not addressed and later_group_address(peer,ident):
+                update(ident,status="silent",phase="group_yield",error=None)
+                return
             if group and answer.strip() in (reply_actions.SILENT,reply_actions.CALL):
                 update(ident,status="silent",phase="group_decision",error=None)
                 return

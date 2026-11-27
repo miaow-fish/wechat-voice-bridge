@@ -148,15 +148,19 @@ def save_profile(data):
         validate_memory(cfg["memory_url"])
         old_window, new_window = st.merge_window(previous), st.merge_window(cfg)
         if old_window != new_window:
+            # Natural groups have their own fixed deadlines.
+            ordinary = """peer NOT IN (SELECT key FROM json_each(COALESCE(
+                (SELECT v FROM config WHERE k='group_routes'), '{}'))
+                WHERE json_extract(value,'$.mode')='natural')"""
             if new_window:
                 now = time.time()
                 # Move only live timers. An expired batch must not reopen when the wait increases.
-                db.execute("""UPDATE turns SET next_try=next_try+?
-                              WHERE status='collecting' AND next_try>?""", (new_window - old_window, now))
-                db.execute("""UPDATE turns SET status='ready', next_try=0
-                              WHERE status='collecting' AND next_try<=?""", (now,))
+                db.execute(f"""UPDATE turns SET next_try=next_try+?
+                              WHERE status='collecting' AND next_try>? AND {ordinary}""", (new_window - old_window, now))
+                db.execute(f"""UPDATE turns SET status='ready', next_try=0
+                              WHERE status='collecting' AND next_try<=? AND {ordinary}""", (now,))
             else:
-                db.execute("UPDATE turns SET status='ready', next_try=0 WHERE status IN ('collecting','sealed')")
+                db.execute(f"UPDATE turns SET status='ready', next_try=0 WHERE status IN ('collecting','sealed') AND {ordinary}")
         st.put(db,"profile",cfg)
     return {"message": "设置已保存，下一轮生效"}
 

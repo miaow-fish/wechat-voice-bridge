@@ -7,6 +7,10 @@ import channel_state as st
 from wechat_case import esc, wx
 
 
+NATURAL_DIRECT_WAIT = 2
+NATURAL_PASSIVE_WAIT = 30
+
+
 def list_page(cursor=""):
     own = wx().get("ownUsername")
     if not own:
@@ -52,7 +56,7 @@ def refresh_page():
 def configure(peer, mode):
     if not isinstance(peer, str) or not peer.endswith("@chatroom") or len(peer)>256:
         raise ValueError("请选择微信账号已加入的群")
-    if mode not in ("off", "auto", "mention"):
+    if mode not in ("off", "auto", "mention", "natural"):
         raise ValueError("请选择有效的群聊发言方式")
     if mode != "off":
         if not wx().get("authenticated"):

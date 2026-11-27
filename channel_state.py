@@ -47,7 +47,8 @@ def init():
                 body TEXT NOT NULL, stamp REAL NOT NULL, turn TEXT);
             CREATE TABLE IF NOT EXISTS group_inputs(
                 message_id TEXT PRIMARY KEY REFERENCES incoming(id),
-                speaker TEXT NOT NULL, mentioned INTEGER NOT NULL DEFAULT 0, sender_key TEXT);
+                speaker TEXT NOT NULL, mentioned INTEGER NOT NULL DEFAULT 0, sender_key TEXT,
+                quoted_self INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS turns(
                 id TEXT PRIMARY KEY, peer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new',
                 kind TEXT, input TEXT, answer TEXT, wire TEXT, send_id TEXT, receipt TEXT,
@@ -90,6 +91,8 @@ def init():
             db.execute("ALTER TABLE turns ADD COLUMN scope TEXT NOT NULL DEFAULT 'direct'")
         if "sender_key" not in {r["name"] for r in db.execute("PRAGMA table_info(group_inputs)")}:
             db.execute("ALTER TABLE group_inputs ADD COLUMN sender_key TEXT")
+        if "quoted_self" not in {r["name"] for r in db.execute("PRAGMA table_info(group_inputs)")}:
+            db.execute("ALTER TABLE group_inputs ADD COLUMN quoted_self INTEGER NOT NULL DEFAULT 0")
         db.execute("CREATE INDEX IF NOT EXISTS turns_pending ON turns(scope,peer,status)")
         db.execute("CREATE INDEX IF NOT EXISTS incoming_turn ON incoming(turn)")
 
@@ -112,7 +115,11 @@ def speaker_line(row, bound_key=None):
     if "speaker" not in row.keys() or not row["speaker"]:
         return ""
     label = "已绑定的私聊好友" if bound_key and row["sender_key"] == bound_key else "群成员 " + row["speaker"]
-    return "〔" + label + (" · @了你" if row["mentioned"] else "") + "〕"
+    if row["mentioned"]:
+        label += " · @了你"
+    if "quoted_self" in row.keys() and row["quoted_self"]:
+        label += " · 引用了你"
+    return "〔" + label + "〕"
 
 
 def merge_window(settings):
@@ -186,7 +193,7 @@ def recent_dialogue(peer,before=None,*,for_call=False,bound_key=None):
             GROUP BY t.id ORDER BY t.rowid DESC LIMIT ?""",(peer,"group" if group else "direct",before,before,limit)).fetchall()
         turns=[]
         for row in rows:
-            inputs=db.execute("""SELECT i.kind,i.body,g.speaker,g.mentioned,g.sender_key,v.transcript,t.tone FROM incoming i
+            inputs=db.execute("""SELECT i.kind,i.body,g.speaker,g.mentioned,g.quoted_self,g.sender_key,v.transcript,t.tone FROM incoming i
                 LEFT JOIN group_inputs g ON g.message_id=i.id
                 LEFT JOIN voice_inputs v ON v.message_id=i.id LEFT JOIN voice_tones t ON t.message_id=i.id
                 WHERE i.turn=? ORDER BY i.rowid""",(row["id"],)).fetchall()
