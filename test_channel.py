@@ -69,6 +69,7 @@ class ChannelTest(unittest.TestCase):
                     actual=worker.reply_messages(cfg,"peer",None,parts,["微信文字"],group=group)
                     self.assertEqual(texts[title],actual[0]["content"])
                     self.assertIn("只回标点或表情包",texts[title])
+                    self.assertIn("微信无法渲染 Markdown。聊天正文只用纯文本",texts[title])
                     self.assertEqual(texts[title].count(reply_actions.STICKER),1)
                     self.assertEqual(texts[title].count(reply_actions.VOICE),int(enabled))
                     self.assertEqual("[laughs]" in texts[title],enabled)

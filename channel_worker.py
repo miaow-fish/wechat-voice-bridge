@@ -368,7 +368,8 @@ def chat_instructions(settings, *, group):
     style = "多用日常口语和短句，句末标点可省，也可以只回标点或表情包。"
     if settings.get("split_bubbles", True):
         style += "想分气泡就换行。"
-    lines = [scene + style]
+    lines = [scene + style,
+             "微信无法渲染 Markdown。聊天正文只用纯文本，省去标题、加粗、列表、反引号和代码块等格式标记。"]
     voice = providers.audio_route_ready(settings, "tts")
     if voice:
         audio=f"每条语音用下面两行，发几条就写几组。台词只写一遍，单发语音时省去文字气泡。\n{reply_actions.VOICE}\n要念的台词"
